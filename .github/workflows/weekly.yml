@@ -7,4 +7,5 @@ on:
 jobs:
   foundry-weekly:
     uses: sarthakagrawal927/saas-maker/.github/workflows/foundry-weekly.yml@main
-
+    with:
+      node-version: '22'
