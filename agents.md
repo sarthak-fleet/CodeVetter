@@ -80,13 +80,13 @@ npm install           # Install all workspace deps
 <claude-mem-context>
 # Memory Context
 
-# [CodeVetter] recent context, 2026-05-02 7:47pm GMT+5:30
+# [CodeVetter] recent context, 2026-05-03 1:58pm GMT+5:30
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 50 obs (15,777t read) | 608,251t work | 97% savings
+Stats: 50 obs (16,337t read) | 634,878t work | 97% savings
 
 ### Apr 25, 2026
 S76 CodeVetter token consumption not updating in real-time — fix real-time stats display + unblock pre-commit hook (Apr 25 at 11:40 AM)
@@ -97,12 +97,7 @@ S90 CodeVetter — does git push trigger auto-release and auto-update? Version b
 S91 CodeVetter token consumption display bug — stats frozen until app restart, fix shipped as v1.1.3 (Apr 25 at 11:48 AM)
 S328 CodeVetter CI now passing — fleet failure resolved (Apr 25 at 3:27 PM)
 ### May 2, 2026
-516 1:57p 🔴 CodeVetter finding-card.tsx — type mismatch fixed: ReviewFinding → CliReviewFinding
-517 " 🔴 CodeVetter tauri-ipc.ts — double-cast fix for saveReview input arg
-520 " 🔵 CodeVetter — 28 files changed in working tree ahead of CI fix commit
-521 " 🔴 CodeVetter CI fix committed — inline workflow, ESLint config, type fixes
 526 1:59p 🔵 CodeVetter CI failure root cause — unsorted imports in Home.tsx
-527 " 🔴 CodeVetter CI lint fixed — sorted imports in Home.tsx
 528 2:00p 🔴 CodeVetter CI now passing — fleet failure resolved
 535 2:02p 🔵 CodeVetter monorepo has apps/landing-page/ directory
 537 " 🔵 CodeVetter Cloudflare Pages build failing on feat/landing-page-overhaul despite GitHub CI passing
@@ -148,6 +143,11 @@ S337 Fix CodeVetter fleet failure — Cloudflare Pages build/deploy failure on f
 707 7:45p ✅ CodeVetter Home.tsx — usage bar colors upgraded to gradient system with glow
 708 7:46p ✅ CodeVetter desktop Tauri build succeeded after usage bar color refactor
 709 7:47p ✅ CodeVetter v1.1.11 Tauri release build + DMG bundled after usage bar color restyle
+710 7:50p ✅ CodeVetter usage bar color overhaul — commit d08e8a2 pushed to origin/main
+711 " 🔵 QuickReview.tsx architecture — branch/PR selection, findings queue, fix diff flow
+712 " 🟣 QuickReview view mode — layout restructured to editor-primary with verdict sidebar
+713 " 🔴 QuickReview.tsx — orphaned JSX from old code viewer left after panel restructure patch
+714 7:51p 🔴 QuickReview.tsx — orphaned old code-viewer JSX removed after panel restructure
 
-Access 608k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 635k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>
