@@ -569,6 +569,10 @@ export default function Settings() {
   const [notifyAgentError, toggleNotifyAgentError] = useBoolPref("notify_agent_error", true);
   const [notifyTaskComplete, toggleNotifyTaskComplete] = useBoolPref("notify_task_complete", false);
   const [notificationSound, toggleNotificationSound] = useBoolPref("notification_sound", true);
+  const [notifyQuotaThresholds, toggleNotifyQuotaThresholds] = useBoolPref("notify_quota_thresholds", true);
+
+  // Menu-bar tray
+  const [trayCadence, setTrayCadence] = usePref("tray_refresh_cadence_secs", "120");
 
   function renderContent() {
     switch (activeCategory) {
@@ -865,10 +869,38 @@ export default function Settings() {
               <Divider />
 
               <Toggle
+                label="Provider Quota Thresholds"
+                description="Notify when any provider window crosses 75%, 90%, or 100% utilization."
+                enabled={notifyQuotaThresholds}
+                onToggle={toggleNotifyQuotaThresholds}
+              />
+
+              <Divider />
+
+              <Toggle
                 label="Notification Sounds"
                 description="Play a short tone for success, error, and info events."
                 enabled={notificationSound}
                 onToggle={toggleNotificationSound}
+              />
+            </div>
+
+            <h3 className="mt-6 mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+              Menu Bar Tray
+            </h3>
+            <div className="rounded-xl border border-[#1a1a1a] bg-[#0a0a0a] p-6">
+              <SelectSetting
+                label="Refresh Cadence"
+                description="How often the menu-bar tray polls each provider for live usage."
+                value={trayCadence}
+                options={[
+                  { value: "manual", label: "Manual only" },
+                  { value: "60", label: "Every minute" },
+                  { value: "120", label: "Every 2 minutes" },
+                  { value: "300", label: "Every 5 minutes" },
+                  { value: "900", label: "Every 15 minutes" },
+                ]}
+                onChange={setTrayCadence}
               />
             </div>
           </div>

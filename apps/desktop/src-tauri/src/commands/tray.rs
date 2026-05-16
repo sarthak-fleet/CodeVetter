@@ -1,5 +1,6 @@
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::AppHandle;
+use tauri_plugin_notification::NotificationExt;
 
 #[tauri::command]
 pub fn set_tray_text(app: AppHandle, text: String) -> Result<(), String> {
@@ -48,5 +49,18 @@ pub fn set_tray_menu(app: AppHandle, lines: Vec<String>) -> Result<(), String> {
         .tray_by_id("main")
         .ok_or_else(|| "tray not initialized".to_string())?;
     tray.set_menu(Some(menu)).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Fire a system notification. Called from `useTrayMonitor` when an account's
+/// worst-window utilization crosses a configured threshold.
+#[tauri::command]
+pub fn send_tray_notification(app: AppHandle, title: String, body: String) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())?;
     Ok(())
 }

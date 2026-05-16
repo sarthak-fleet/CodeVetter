@@ -1,0 +1,54 @@
+name: Deploy Landing Page
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/deploy-landing.yml"
+      - "apps/landing-page/**"
+      - "package.json"
+      - "package-lock.json"
+      - "pnpm-lock.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: deploy-landing-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build static landing page
+        working-directory: apps/landing-page
+        run: npm run build
+
+      - name: Verify required static routes
+        run: |
+          test -f apps/landing-page/out/index.html
+          test -f apps/landing-page/out/privacy/index.html
+          test -f apps/landing-page/out/download/index.html
+          test -f apps/landing-page/out/sitemap.xml
+          test -f apps/landing-page/out/robots.txt
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy apps/landing-page/out --project-name=codevetter --branch=main
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}

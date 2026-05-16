@@ -213,6 +213,7 @@ fn main() {
             // Tray
             commands::tray::set_tray_text,
             commands::tray::set_tray_menu,
+            commands::tray::send_tray_notification,
             // Repo Unpacked
             commands::unpack::scan_repo_inventory,
             commands::unpack::generate_unpack_report,

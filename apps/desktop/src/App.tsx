@@ -8,6 +8,7 @@ import Onboarding from "@/components/onboarding";
 import Sidebar from "@/components/sidebar";
 import UpdateChecker from "@/components/update-checker";
 import { getPreference, isTauriAvailable } from "@/lib/tauri-ipc";
+import { useTrayMonitor } from "@/lib/use-tray-monitor";
 // Pages
 import Home from "@/pages/Home";
 import QuickReview from "@/pages/QuickReview";
@@ -98,6 +99,7 @@ class RouteErrorBoundary extends Component<
 function Shell() {
   const { showOnboarding, setShowOnboarding, ready } = useOnboarding();
   const { isOpen, close } = useCommandPalette();
+  useTrayMonitor();
 
   if (!ready) {
     return (

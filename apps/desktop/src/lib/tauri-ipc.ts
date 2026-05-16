@@ -494,6 +494,13 @@ export async function setTrayMenu(lines: string[]): Promise<void> {
   return safeInvoke<void>("set_tray_menu", { lines });
 }
 
+export async function sendTrayNotification(
+  title: string,
+  body: string
+): Promise<void> {
+  return safeInvoke<void>("send_tray_notification", { title, body });
+}
+
 export async function getIndexStats(): Promise<IndexStats> {
   return safeInvoke<IndexStats>("get_index_stats");
 }
