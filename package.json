@@ -13,10 +13,10 @@
     "apps/desktop/src/**/*.{ts,tsx}": ["eslint --quiet --max-warnings 50"]
   },
   "devDependencies": {
-    "@saas-maker/eslint-config": "^1.0.5",
+    "@saas-maker/eslint-config": "^1.0.7",
     "@typescript-eslint/eslint-plugin": "^8.57.1",
     "@typescript-eslint/parser": "^8.57.1",
-    "eslint": "^10.0.3",
+    "eslint": "^9.39.4",
     "husky": "^9.1.7",
     "lint-staged": "^16.4.0"
   }
