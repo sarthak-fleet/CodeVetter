@@ -16,7 +16,8 @@ export const metadata: Metadata = {
   },
 };
 
-const posthogKey = process.env.NEXT_PUBLIC_POSTHOG_KEY ?? "";
+const posthogKey =
+  process.env.NEXT_PUBLIC_POSTHOG_KEY ?? "phc_qgiAarw4Co4pw9fz3Fxj4UJaHmqzFetqs4JrXhGc35Nd";
 const posthogHost = process.env.NEXT_PUBLIC_POSTHOG_HOST ?? "https://us.i.posthog.com";
 
 export default function RootLayout({
