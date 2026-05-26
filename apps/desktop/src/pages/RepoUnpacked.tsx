@@ -2,12 +2,14 @@ import {
   AlertTriangle,
   ArrowRight,
   Boxes,
+  ChevronRight,
   Copy,
   Download,
   ExternalLink,
   FileCode,
   FilePlus2,
   FileText,
+  Folder,
   FolderOpen,
   Layers,
   Loader2,
@@ -53,6 +55,8 @@ import {
   pickDirectory,
   scanRepoInventory,
   setPreference,
+  type UnpackDirSummary,
+  type UnpackLanguageCount,
   type UnpackRepoInventory,
   type UnpackReport,
   type UnpackReportRecord,
@@ -673,6 +677,232 @@ function RepoPicker({
   );
 }
 
+function LanguageBars({ languages }: { languages: UnpackLanguageCount[] }) {
+  if (!languages.length) return null;
+  const sorted = [...languages].sort((a, b) => b.files - a.files);
+  const maxFiles = sorted[0]?.files ?? 1;
+  return (
+    <div>
+      <div className="cv-label mb-2">
+        Languages ({sorted.length})
+      </div>
+      <div className="space-y-1">
+        {sorted.map((l, i) => {
+          const pct = (l.files / maxFiles) * 100;
+          const opacity = Math.max(0.4, 1 - i * 0.06);
+          return (
+            <div key={l.language} className="flex items-center gap-3 text-xs">
+              <span className="w-24 shrink-0 truncate font-mono text-[var(--text-secondary)]">
+                {l.language}
+              </span>
+              <div className="relative h-5 flex-1 overflow-hidden rounded-sm bg-[var(--bg-raised)]">
+                <div
+                  className="absolute inset-y-0 left-0 rounded-sm bg-[var(--cv-accent)]"
+                  style={{ width: `${pct}%`, opacity }}
+                />
+                <span className="relative z-10 flex h-full items-center px-2 font-mono text-[10px] text-[var(--text-primary)] mix-blend-difference">
+                  {l.files.toLocaleString()}{" "}
+                  {l.files === 1 ? "file" : "files"} · {formatBytes(l.bytes)}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TopDirsBars({ dirs }: { dirs: UnpackDirSummary[] }) {
+  if (!dirs.length) return null;
+  const sorted = [...dirs].sort((a, b) => b.bytes - a.bytes);
+  const maxBytes = sorted[0]?.bytes ?? 1;
+  return (
+    <div>
+      <div className="cv-label mb-2">
+        Top-level directories ({sorted.length})
+      </div>
+      <div className="space-y-1">
+        {sorted.map((d, i) => {
+          const pct = (d.bytes / maxBytes) * 100;
+          const opacity = Math.max(0.4, 1 - i * 0.06);
+          return (
+            <div key={d.path} className="flex items-center gap-3 text-xs">
+              <span className="w-24 shrink-0 truncate font-mono text-[var(--text-secondary)]">
+                {d.path}
+              </span>
+              <div className="relative h-5 flex-1 overflow-hidden rounded-sm bg-[var(--bg-raised)]">
+                <div
+                  className="absolute inset-y-0 left-0 rounded-sm bg-[var(--cv-accent)]"
+                  style={{ width: `${pct}%`, opacity }}
+                />
+                <span className="relative z-10 flex h-full items-center px-2 font-mono text-[10px] text-[var(--text-primary)] mix-blend-difference">
+                  {d.file_count.toLocaleString()} files · {formatBytes(d.bytes)}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+type DirTreeNode = {
+  name: string;
+  path: string;
+  isDir: boolean;
+  fileCount: number;
+  children: Map<string, DirTreeNode>;
+};
+
+function buildDirTree(paths: string[]): DirTreeNode {
+  const root: DirTreeNode = {
+    name: "",
+    path: "",
+    isDir: true,
+    fileCount: 0,
+    children: new Map(),
+  };
+  for (const raw of paths) {
+    const parts = raw.split("/").filter(Boolean);
+    if (!parts.length) continue;
+    let cur = root;
+    for (let i = 0; i < parts.length; i++) {
+      const name = parts[i];
+      const isLast = i === parts.length - 1;
+      const fullPath = parts.slice(0, i + 1).join("/");
+      let child = cur.children.get(name);
+      if (!child) {
+        child = {
+          name,
+          path: fullPath,
+          isDir: !isLast,
+          fileCount: 0,
+          children: new Map(),
+        };
+        cur.children.set(name, child);
+      } else if (!isLast && !child.isDir) {
+        child.isDir = true;
+      }
+      cur = child;
+    }
+  }
+  const count = (n: DirTreeNode): number => {
+    if (!n.isDir) return 1;
+    let total = 0;
+    for (const c of n.children.values()) total += count(c);
+    n.fileCount = total;
+    return total;
+  };
+  count(root);
+  return root;
+}
+
+function DirTreeNodeView({
+  node,
+  depth,
+  defaultOpen,
+}: {
+  node: DirTreeNode;
+  depth: number;
+  defaultOpen: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const sortedChildren = useMemo(() => {
+    return Array.from(node.children.values()).sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [node]);
+  return (
+    <>
+      <div
+        className={cn(
+          "flex items-center gap-1.5 rounded-sm py-0.5 text-xs",
+          node.isDir
+            ? "cursor-pointer hover:bg-[var(--bg-raised)]"
+            : "text-[var(--text-secondary)]",
+        )}
+        style={{ paddingLeft: `${depth * 14 + 4}px` }}
+        onClick={() => node.isDir && setOpen((v) => !v)}
+      >
+        {node.isDir ? (
+          <ChevronRight
+            size={12}
+            className={cn(
+              "shrink-0 transition-transform text-[var(--text-muted)]",
+              open && "rotate-90",
+            )}
+          />
+        ) : (
+          <span className="w-3 shrink-0" />
+        )}
+        {node.isDir ? (
+          <Folder size={12} className="shrink-0 text-[var(--cv-accent)]" />
+        ) : (
+          <FileCode size={12} className="shrink-0 text-[var(--text-muted)]" />
+        )}
+        <span
+          className={cn(
+            "truncate font-mono",
+            node.isDir
+              ? "text-[var(--text-primary)]"
+              : "text-[var(--text-secondary)]",
+          )}
+        >
+          {node.name}
+        </span>
+        {node.isDir && (
+          <span className="ml-1 text-[10px] text-[var(--text-muted)]">
+            {node.fileCount.toLocaleString()}
+          </span>
+        )}
+      </div>
+      {open && node.isDir && (
+        <div>
+          {sortedChildren.map((c) => (
+            <DirTreeNodeView
+              key={c.path}
+              node={c}
+              depth={depth + 1}
+              defaultOpen={false}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function DirectoryTree({ files }: { files: string[] }) {
+  const root = useMemo(() => buildDirTree(files), [files]);
+  const rootChildren = useMemo(() => {
+    return Array.from(root.children.values()).sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [root]);
+  if (!rootChildren.length) return null;
+  return (
+    <div>
+      <div className="cv-label mb-2">
+        Directory tree ({root.fileCount.toLocaleString()} files)
+      </div>
+      <div className="max-h-96 overflow-y-auto rounded-md border border-[var(--cv-line)] bg-[var(--bg-raised)]/40 p-2">
+        {rootChildren.map((c) => (
+          <DirTreeNodeView
+            key={c.path}
+            node={c}
+            depth={0}
+            defaultOpen={c.isDir && rootChildren.length <= 8}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function InventorySummary({
   inventory,
   agent,
@@ -753,21 +983,11 @@ function InventorySummary({
           </div>
         )}
 
-        {inventory.languages.length > 0 && (
-          <div>
-            <div className="cv-label mb-1.5">Top languages</div>
-            <div className="flex flex-wrap gap-1.5">
-              {inventory.languages.slice(0, 8).map((l) => (
-                <span
-                  key={l.language}
-                  className="rounded border border-[var(--cv-line)] bg-[var(--bg-raised)] px-2 py-0.5 font-mono text-[11px] text-[var(--text-secondary)]"
-                >
-                  {l.language} · {l.files}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
+        <LanguageBars languages={inventory.languages} />
+
+        <TopDirsBars dirs={inventory.top_level_dirs} />
+
+        <DirectoryTree files={inventory.all_files} />
 
         {inventory.entrypoints.length > 0 && (
           <div>
