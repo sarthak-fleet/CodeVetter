@@ -47,6 +47,56 @@ fn resolve_cli_path(name: &str) -> String {
     name.to_string()
 }
 
+fn read_repo_conventions(repo_path: &str) -> String {
+    const BUDGET: usize = 16 * 1024;
+    let candidates = ["CLAUDE.md", "agents.md", "AGENTS.md"];
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut parts: Vec<String> = Vec::new();
+    let mut budget = BUDGET;
+
+    for name in candidates {
+        let path = std::path::Path::new(repo_path).join(name);
+        if !path.is_file() {
+            continue;
+        }
+        let key = name.to_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let take = trimmed.len().min(budget);
+        if take == 0 {
+            break;
+        }
+        let mut end = take;
+        while end > 0 && !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == 0 {
+            break;
+        }
+        let slice = &trimmed[..end];
+        parts.push(format!("### {name}\n{slice}"));
+        budget = budget.saturating_sub(end);
+        if budget == 0 {
+            break;
+        }
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nRepo conventions (authoritative — findings that contradict these should be dropped):\n{}\n",
+            parts.join("\n\n")
+        )
+    }
+}
+
 /// Look up the latest talk for this project and prepend it as context if fresh enough.
 fn maybe_prepend_talk_context(
     conn: &rusqlite::Connection,
@@ -272,22 +322,63 @@ pub async fn run_cli_review(
         return Err(format!("git diff failed: {stderr}"));
     }
 
-    let mut diff_text = String::from_utf8_lossy(&output.stdout).to_string();
+    let raw_diff = String::from_utf8_lossy(&output.stdout).to_string();
 
-    // 2. Truncate to 100KB if too large
-    const MAX_DIFF_BYTES: usize = 100 * 1024;
-    if diff_text.len() > MAX_DIFF_BYTES {
-        diff_text.truncate(MAX_DIFF_BYTES);
-        diff_text.push_str("\n\n[DIFF TRUNCATED at 100KB]");
-    }
-
-    if diff_text.trim().is_empty() {
+    if raw_diff.trim().is_empty() {
         return Err("Empty diff — nothing to review".to_string());
     }
 
-    // 3. Compute a graph-aware blast-radius summary to give the model
-    //    real caller counts for every changed symbol. Failure is non-fatal —
-    //    the model still gets the diff.
+    const MAX_DIFF_BYTES: usize = 100 * 1024;
+    let was_truncated = raw_diff.len() > MAX_DIFF_BYTES;
+    let mut diff_text = raw_diff;
+    if was_truncated {
+        let mut end = MAX_DIFF_BYTES;
+        while end > 0 && !diff_text.is_char_boundary(end) {
+            end -= 1;
+        }
+        diff_text.truncate(end);
+        diff_text.push_str("\n\n[DIFF TRUNCATED at 100KB — see file list above for the full change surface]");
+    }
+
+    let changed_files: Vec<String> = StdCommand::new("git")
+        .args(["diff", "--name-only", &diff_range])
+        .current_dir(&repo_path)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let files_section = if changed_files.is_empty() {
+        String::new()
+    } else {
+        let listed = changed_files
+            .iter()
+            .map(|f| format!("- {f}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let header = if was_truncated {
+            format!(
+                "\nFiles changed in this range ({} total — diff below was truncated to 100KB, use your file-read tools to inspect any not fully shown):\n{}\n",
+                changed_files.len(),
+                listed
+            )
+        } else {
+            format!(
+                "\nFiles changed in this range ({} total):\n{}\n",
+                changed_files.len(),
+                listed
+            )
+        };
+        header
+    };
+
     let blast_summary = crate::commands::blast_radius::compute_blast_radius(&repo_path, &diff_range)
         .ok()
         .as_ref()
@@ -300,24 +391,35 @@ pub async fn run_cli_review(
         format!("\n{blast_summary}\n")
     };
 
-    // 4. Build the review prompt
+    let conventions_section = read_repo_conventions(&repo_path);
+
     let base_prompt = format!(
-        r#"You are a senior code reviewer. Review the following diff and return ONLY valid JSON (no markdown fences, no extra text).
+        r#"You are a senior code reviewer for an experienced engineer. Find *real* issues — security holes, correctness bugs, regression risk, broken contracts. Skip style nitpicks and speculative concerns.
 
 Project: {project_description}
 Change: {change_description}
-{blast_section}
-Return this exact JSON shape:
-{{"findings":[{{"severity":"critical|high|medium|low","title":"...","summary":"...","suggestion":"...","filePath":"...","line":42,"confidence":0.9}}],"score":75,"summary":"Overall assessment","talk":{{"files_read":["src/file.ts"],"files_modified":[],"actions_summary":"What you reviewed and found","unfinished_work":null,"key_decisions":"Important observations about the code","recommended_next_steps":"What should happen next"}}}}
+{conventions_section}{files_section}{blast_section}
+How to review:
+1. Read the diff carefully. You have file-read tools — use them when a finding's validity depends on context the diff doesn't show (callers, tests, related files, imports, prior implementation).
+2. Verify each potential issue against the actual code before reporting. If you cannot cite specific lines that prove the problem, drop the finding — or, if the signal is real but unverified, lower confidence honestly instead of hiding the uncertainty.
+3. Use the blast-radius data above to weight severity: a behavior change to a symbol with 6+ callers should be at least medium severity unless the change is provably backward-compatible.
+4. Skip nitpicks (formatting, naming preference, missing comments) unless they will cause real bugs or break a workflow.
+5. Repo conventions above are authoritative. Drop findings that contradict them.
+
+Output format:
+
+Think through the review first (you may use tools and write reasoning notes). Then output **exactly one** ```json fenced block as the very LAST thing in your response, matching this shape. Do not emit any other ```json fenced blocks anywhere — examples in your reasoning should be unfenced or use a different language tag.
+
+JSON shape (literal text, not a fenced example):
+{{"findings":[{{"severity":"critical|high|medium|low","title":"...","summary":"... — include the specific lines that prove the problem","suggestion":"...","filePath":"...","line":42,"confidence":0.9}}],"score":75,"summary":"Overall assessment","talk":{{"files_read":["src/file.ts"],"files_modified":[],"actions_summary":"What you reviewed and found","unfinished_work":null,"key_decisions":"Important observations about the code","recommended_next_steps":"What should happen next"}}}}
 
 Rules:
 - severity must be one of: critical, high, medium, low
-- confidence is 0.0-1.0
-- line is optional (use null if unknown)
-- filePath should be relative to repo root
+- confidence is 0.0-1.0 — be honest; downgrade rather than overclaim
+- line is optional (null if unknown); filePath relative to repo root
 - score is 0-100 (100 = perfect)
-- Be specific and actionable
-- The "talk" object captures context for agent handover — fill it in based on your review
+- Each finding's `summary` must reference the specific line(s) or symbol(s) that prove the problem
+- The "talk" object captures context for the next review/fix run — populate `files_read` with anything you actually opened
 
 Diff:
 {diff_text}"#
@@ -911,32 +1013,46 @@ pub fn resolve_cli_path_pub(name: &str) -> String {
     resolve_cli_path(name)
 }
 
-/// Extract a JSON object from CLI output that may contain markdown code fences
-/// or other surrounding text.
 fn extract_json_from_output(output: &str) -> Option<String> {
-    // Try to find JSON inside ```json ... ``` or ``` ... ``` blocks first
-    if let Some(start) = output.find("```json") {
-        let after_fence = &output[start + 7..];
-        if let Some(end) = after_fence.find("```") {
-            let candidate = after_fence[..end].trim();
+    let mut last_fenced: Option<String> = None;
+    let mut cursor = 0;
+    while let Some(rel) = output[cursor..].find("```json") {
+        let start = cursor + rel + 7;
+        if let Some(end_rel) = output[start..].find("```") {
+            let candidate = output[start..start + end_rel].trim();
             if serde_json::from_str::<Value>(candidate).is_ok() {
-                return Some(candidate.to_string());
+                last_fenced = Some(candidate.to_string());
             }
+            cursor = start + end_rel + 3;
+        } else {
+            break;
         }
     }
-    if let Some(start) = output.find("```\n") {
-        let after_fence = &output[start + 4..];
-        if let Some(end) = after_fence.find("```") {
-            let candidate = after_fence[..end].trim();
-            if serde_json::from_str::<Value>(candidate).is_ok() {
-                return Some(candidate.to_string());
-            }
-        }
+    if let Some(found) = last_fenced {
+        return Some(found);
     }
 
-    // Try to find a raw JSON object by looking for the outermost { ... }
+    let mut last_bare: Option<String> = None;
+    let mut cursor = 0;
+    while let Some(rel) = output[cursor..].find("```\n") {
+        let start = cursor + rel + 4;
+        if let Some(end_rel) = output[start..].find("```") {
+            let candidate = output[start..start + end_rel].trim();
+            if serde_json::from_str::<Value>(candidate).is_ok() {
+                last_bare = Some(candidate.to_string());
+            }
+            cursor = start + end_rel + 3;
+        } else {
+            break;
+        }
+    }
+    if let Some(found) = last_bare {
+        return Some(found);
+    }
+
     let mut depth = 0i32;
     let mut json_start: Option<usize> = None;
+    let mut last_raw: Option<String> = None;
     for (i, ch) in output.char_indices() {
         match ch {
             '{' => {
@@ -951,7 +1067,7 @@ fn extract_json_from_output(output: &str) -> Option<String> {
                     if let Some(start) = json_start {
                         let candidate = &output[start..=i];
                         if serde_json::from_str::<Value>(candidate).is_ok() {
-                            return Some(candidate.to_string());
+                            last_raw = Some(candidate.to_string());
                         }
                     }
                     json_start = None;
@@ -960,8 +1076,7 @@ fn extract_json_from_output(output: &str) -> Option<String> {
             _ => {}
         }
     }
-
-    None
+    last_raw
 }
 
 /// List reviews with pagination and optional repo filter.
