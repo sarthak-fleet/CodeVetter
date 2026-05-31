@@ -10,13 +10,13 @@ const cols: { label: string; items: ColItem[] }[] = [
       { l: "Features", h: "#features" },
       { l: "How it works", h: "#how" },
       { l: "Pricing", h: "#pricing" },
-      { l: "Changelog", h: "https://github.com/sarthakagrawal927/CodeVetter/releases" },
+      { l: "Changelog", h: "https://github.com/sarthak-fleet/CodeVetter/releases" },
     ],
   },
   {
     label: "Resources",
     items: [
-      { l: "Documentation", h: "https://github.com/sarthakagrawal927/CodeVetter#readme" },
+      { l: "Documentation", h: "https://github.com/sarthak-fleet/CodeVetter#readme" },
       { l: "Security Hub", h: "#" },
       { l: "Bug Bounty", h: "#" },
     ],
@@ -24,7 +24,7 @@ const cols: { label: string; items: ColItem[] }[] = [
   {
     label: "Connect",
     items: [
-      { l: "GitHub", h: "https://github.com/sarthakagrawal927/CodeVetter", icon: <Github className="w-3.5 h-3.5" /> },
+      { l: "GitHub", h: "https://github.com/sarthak-fleet/CodeVetter", icon: <Github className="w-3.5 h-3.5" /> },
       { l: "Twitter", h: "#", icon: <Twitter className="w-3.5 h-3.5" /> },
       { l: "Email", h: "mailto:hello@codevetter.dev", icon: <Mail className="w-3.5 h-3.5" /> },
     ],
@@ -82,7 +82,7 @@ export function Footer() {
           <span>© {new Date().getFullYear()} CodeVetter · ISC License</span>
           <a href="/privacy" className="hover:text-white transition-colors">Privacy</a>
           <a
-            href="https://github.com/sarthakagrawal927/CodeVetter"
+            href="https://github.com/sarthak-fleet/CodeVetter"
             className="hover:text-white transition-colors"
           >
             GitHub

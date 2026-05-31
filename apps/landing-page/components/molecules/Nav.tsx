@@ -44,7 +44,7 @@ export function Nav() {
         </nav>
 
         <div className="flex items-center gap-2">
-          <Button variant="ghost" href="https://github.com/sarthakagrawal927/CodeVetter" className="hidden sm:inline-flex h-9 px-4 text-xs">
+          <Button variant="ghost" href="https://github.com/sarthak-fleet/CodeVetter" className="hidden sm:inline-flex h-9 px-4 text-xs">
             GitHub
           </Button>
           <Button variant="primary" href="#download" className="h-9 px-5 text-xs">

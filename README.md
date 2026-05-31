@@ -46,7 +46,7 @@ The product should prefer narrow, evidence-backed loops over broad "code intelli
 
 ```bash
 # Clone and install dependencies (uses npm workspaces)
-git clone https://github.com/sarthakagrawal927/CodeVetter.git
+git clone https://github.com/sarthak-fleet/CodeVetter.git
 cd CodeVetter
 npm install
 ```

@@ -38,7 +38,7 @@ export function CTA() {
             <div className="mt-12 flex flex-wrap items-center justify-center gap-4">
               <Button
                 variant="primary"
-                href="https://github.com/sarthakagrawal927/CodeVetter/releases/latest"
+                href="https://github.com/sarthak-fleet/CodeVetter/releases/latest"
                 className="h-14 px-8"
               >
                 <Apple className="w-5 h-5" />
@@ -49,7 +49,7 @@ export function CTA() {
               </Button>
               <Button
                 variant="glass"
-                href="https://github.com/sarthakagrawal927/CodeVetter/releases/latest"
+                href="https://github.com/sarthak-fleet/CodeVetter/releases/latest"
                 className="h-14 px-8"
               >
                 Other Platforms

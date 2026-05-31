@@ -65,7 +65,7 @@ export default function DownloadPage() {
         </p>
 
         <a
-          href="https://github.com/sarthakagrawal927/CodeVetter/releases/latest"
+          href="https://github.com/sarthak-fleet/CodeVetter/releases/latest"
           target="_blank"
           rel="noopener noreferrer"
           className="mt-6 inline-block rounded-md bg-amber-500 px-4 py-2 text-sm font-medium text-stone-950 hover:bg-amber-400"
@@ -91,7 +91,7 @@ export default function DownloadPage() {
         <p className="mt-10 text-xs text-stone-500">
           Building from source? See the{" "}
           <a
-            href="https://github.com/sarthakagrawal927/CodeVetter"
+            href="https://github.com/sarthak-fleet/CodeVetter"
             target="_blank"
             rel="noopener noreferrer"
             className="underline hover:text-amber-400"

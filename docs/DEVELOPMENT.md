@@ -12,7 +12,7 @@
 ### Clone and install
 
 ```bash
-git clone https://github.com/sarthakagrawal927/CodeVetter.git
+git clone https://github.com/sarthak-fleet/CodeVetter.git
 cd CodeVetter
 npm install
 ```
