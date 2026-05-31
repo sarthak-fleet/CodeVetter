@@ -2,6 +2,8 @@ import {
   AlertTriangle,
   ArrowRight,
   Boxes,
+  CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   Copy,
   Download,
@@ -9,17 +11,22 @@ import {
   FileCode,
   FilePlus2,
   FileText,
+  FlaskConical,
   Folder,
   FolderOpen,
+  GitCommit,
+  History,
   Layers,
   Loader2,
   Network,
   Package,
+  Plug,
   RefreshCw,
   ScanSearch,
   ShieldAlert,
   Sparkles,
   Trash2,
+  Workflow,
   Wrench,
 } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
@@ -98,16 +105,34 @@ const SECTION_META: Array<{
     blurb: "Routes, screens, commands, jobs, APIs — and where each lives.",
   },
   {
+    key: "data_flow",
+    title: "Data Flow",
+    Icon: Workflow,
+    blurb: "How data moves: input boundaries, transforms, state owners, outputs.",
+  },
+  {
     key: "behavior_traces",
     title: "Behavior Traces",
     Icon: ArrowRight,
     blurb: "Startup, persistence, review execution, settings, release flow.",
   },
   {
+    key: "testing_signals",
+    title: "Testing Signals",
+    Icon: FlaskConical,
+    blurb: "Test framework, what's covered vs uncovered, fixtures, CI integration.",
+  },
+  {
     key: "risk_map",
     title: "Risk Map",
     Icon: ShieldAlert,
     blurb: "Security paths, untested critical flows, fragile coupling, traps.",
+  },
+  {
+    key: "extension_points",
+    title: "Extension Points",
+    Icon: Plug,
+    blurb: "Where new code plugs in — registries, command tables, provider contracts.",
   },
   {
     key: "agent_handoff",
@@ -135,13 +160,70 @@ function repoNameFromPath(path: string): string {
   return last || path;
 }
 
+type StatusKind = "ok" | "failed" | "pending";
+
+function timelineStatusKind(status: string | null | undefined): StatusKind {
+  const s = (status ?? "").toLowerCase();
+  if (s === "failed" || s === "error" || s === "errored") return "failed";
+  if (s === "running" || s === "in_progress" || s === "pending" || s === "queued")
+    return "pending";
+  return "ok";
+}
+
+function timelineDateLabel(d: Date, now: Date): string {
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (sameDay(d, now)) return "Today";
+  if (sameDay(d, yesterday)) return "Yesterday";
+  const ageMs = now.getTime() - d.getTime();
+  if (ageMs >= 0 && ageMs < 7 * 24 * 60 * 60 * 1000) {
+    return d.toLocaleDateString(undefined, { weekday: "long" });
+  }
+  if (d.getFullYear() === now.getFullYear()) {
+    return d.toLocaleDateString(undefined, {
+      month: "long",
+      day: "numeric",
+    });
+  }
+  return d.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "long",
+  });
+}
+
+function groupTimelineByDate(
+  rows: UnpackReportSummary[],
+): Array<{ label: string; rows: UnpackReportSummary[] }> {
+  const now = new Date();
+  const groups: Array<{ label: string; rows: UnpackReportSummary[] }> = [];
+  for (const r of rows) {
+    const label = timelineDateLabel(new Date(r.created_at), now);
+    const last = groups[groups.length - 1];
+    if (last && last.label === label) {
+      last.rows.push(r);
+    } else {
+      groups.push({ label, rows: [r] });
+    }
+  }
+  return groups;
+}
+
 export default function RepoUnpacked() {
   const [repoPath, setRepoPath] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [active, setActive] = useState<ActiveReportState | null>(null);
   const [history, setHistory] = useState<UnpackReportSummary[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [agent, setAgent] = useState<string>("claude");
+  const [timelineRepoPath, setTimelineRepoPath] = useState<string | null>(null);
+  const [timelineRepoName, setTimelineRepoName] = useState<string>("");
+  const [timelineRows, setTimelineRows] = useState<UnpackReportSummary[]>([]);
+  const [timelineLoading, setTimelineLoading] = useState(false);
 
   // Restore last repo path
   useEffect(() => {
@@ -165,18 +247,54 @@ export default function RepoUnpacked() {
   useEffect(() => {
     if (!isTauriAvailable()) return;
     let cancelled = false;
+    setHistoryLoading(true);
     (async () => {
       try {
-        const rows = await listRepoUnpackReports(undefined, 25);
+        const rows = await listRepoUnpackReports(undefined, 50);
         if (!cancelled) setHistory(rows);
       } catch {
         // listReports may fail if DB not initialized yet — ignore
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
       }
     })();
     return () => {
       cancelled = true;
     };
   }, [historyTick]);
+
+  useEffect(() => {
+    if (!timelineRepoPath || !isTauriAvailable()) return;
+    let cancelled = false;
+    setTimelineLoading(true);
+    (async () => {
+      try {
+        const rows = await listRepoUnpackReports(timelineRepoPath, 200);
+        if (!cancelled) setTimelineRows(rows);
+      } catch {
+        /* ignore */
+      } finally {
+        if (!cancelled) setTimelineLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [timelineRepoPath, historyTick]);
+
+  const handleOpenTimeline = useCallback(
+    (repoPath: string, repoName: string) => {
+      setTimelineRepoPath(repoPath);
+      setTimelineRepoName(repoName);
+    },
+    [],
+  );
+
+  const handleCloseTimeline = useCallback(() => {
+    setTimelineRepoPath(null);
+    setTimelineRepoName("");
+    setTimelineRows([]);
+  }, []);
 
   const persistRepoPath = useCallback(async (p: string) => {
     if (!isTauriAvailable()) return;
@@ -454,12 +572,30 @@ export default function RepoUnpacked() {
           <HowItWorks />
         )}
 
-        <HistoryList
-          history={history}
-          activeId={active?.reportId}
-          onLoad={handleLoadReport}
-          onDelete={handleDeleteReport}
-        />
+        {timelineRepoPath ? (
+          <HistoryList
+            history={timelineRows}
+            activeId={active?.reportId}
+            onLoad={handleLoadReport}
+            onDelete={handleDeleteReport}
+            onRefresh={refreshHistory}
+            refreshing={timelineLoading}
+            mode="timeline"
+            timelineRepoName={timelineRepoName}
+            onBack={handleCloseTimeline}
+          />
+        ) : (
+          <HistoryList
+            history={history}
+            activeId={active?.reportId}
+            onLoad={handleLoadReport}
+            onDelete={handleDeleteReport}
+            onRefresh={refreshHistory}
+            refreshing={historyLoading}
+            mode="all"
+            onOpenTimeline={handleOpenTimeline}
+          />
+        )}
       </div>
     </TooltipProvider>
   );
@@ -1315,84 +1451,370 @@ function HistoryList({
   activeId,
   onLoad,
   onDelete,
+  onRefresh,
+  refreshing,
+  mode,
+  timelineRepoName,
+  onOpenTimeline,
+  onBack,
 }: {
   history: UnpackReportSummary[];
   activeId?: string;
   onLoad: (id: string) => void;
   onDelete: (id: string) => void;
+  onRefresh: () => void;
+  refreshing?: boolean;
+  mode: "all" | "timeline";
+  timelineRepoName?: string;
+  onOpenTimeline?: (repoPath: string, repoName: string) => void;
+  onBack?: () => void;
 }) {
-  if (history.length === 0) return null;
+  const isTimeline = mode === "timeline";
+  const Icon = isTimeline ? History : Layers;
+  const title = isTimeline
+    ? `Timeline · ${timelineRepoName ?? ""}`.trim()
+    : "Unpacks";
+  const subtitle = isTimeline
+    ? "Every saved brief for this repo, newest first. Click any to load it."
+    : "Saved locally. Refresh to pick up briefs generated elsewhere; open a row's timeline to see how a repo evolved.";
+
   return (
     <Card className="mt-8 border-[var(--cv-line)] bg-[var(--bg-surface)]">
       <CardHeader className="pb-3">
-        <CardTitle className="flex items-center gap-2 text-base">
-          <RefreshCw size={16} className="text-[var(--cv-accent)]" />
-          Recent unpacks
-        </CardTitle>
-        <CardDescription className="text-xs">
-          Stored locally — compare regenerated briefs across commits.
-        </CardDescription>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Icon size={16} className="text-[var(--cv-accent)]" />
+              {title}
+              <Badge
+                variant="outline"
+                className="border-[var(--cv-line)] bg-[var(--bg-raised)] font-mono text-[10px] text-[var(--text-muted)]"
+              >
+                {history.length}
+              </Badge>
+            </CardTitle>
+            <CardDescription className="mt-1 text-xs">
+              {subtitle}
+            </CardDescription>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            {isTimeline && onBack && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={onBack}
+              >
+                <ChevronLeft size={14} className="mr-1" />
+                All unpacks
+              </Button>
+            )}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={onRefresh}
+              disabled={refreshing}
+              aria-label="Refresh unpacks"
+            >
+              <RefreshCw
+                size={14}
+                className={cn("mr-1.5", refreshing && "animate-spin")}
+              />
+              Refresh
+            </Button>
+          </div>
+        </div>
       </CardHeader>
       <CardContent>
         <Separator className="mb-3 bg-[var(--cv-line)]" />
-        <ul className="divide-y divide-[var(--cv-line)]">
-          {history.map((row) => {
-            const isActive = row.id === activeId;
-            return (
-              <li
-                key={row.id}
-                className={cn(
-                  "flex flex-col gap-1 py-2.5 sm:flex-row sm:items-center sm:justify-between",
-                  isActive && "bg-cyan-500/5",
-                )}
-              >
-                <button
-                  type="button"
-                  className="flex flex-col text-left"
-                  onClick={() => onLoad(row.id)}
-                >
-                  <span className="text-sm font-medium text-[var(--text-primary)]">
-                    {row.repo_name}{" "}
-                    <span className="font-mono text-[10px] text-[var(--text-muted)]">
-                      {row.commit_sha?.slice(0, 8) ?? ""}
-                    </span>
-                  </span>
-                  <span className="text-[11px] text-[var(--text-muted)]">
-                    {new Date(row.created_at).toLocaleString()} ·{" "}
-                    {row.status} · {formatRuntime(row.runtime_ms)} ·{" "}
-                    {row.files_scanned.toLocaleString()} files
-                  </span>
-                </button>
-                <div className="flex items-center gap-2">
-                  {row.status === "failed" && row.error_message && (
-                    <span className="font-mono text-[10px] text-red-300">
-                      {row.error_message.slice(0, 60)}
-                    </span>
+        {history.length === 0 ? (
+          <div className="rounded-md border border-dashed border-[var(--cv-line)] bg-[var(--bg-raised)]/40 px-4 py-6 text-center text-xs text-[var(--text-secondary)]">
+            {isTimeline
+              ? "No unpacks for this repo yet."
+              : "No unpacks yet. Pick a repo above and click Generate Brief to seed your history."}
+          </div>
+        ) : isTimeline ? (
+          <TimelineRows
+            rows={history}
+            activeId={activeId}
+            onLoad={onLoad}
+            onDelete={onDelete}
+          />
+        ) : (
+          <ul className="divide-y divide-[var(--cv-line)]">
+            {history.map((row) => {
+              const isActive = row.id === activeId;
+              return (
+                <li
+                  key={row.id}
+                  className={cn(
+                    "flex flex-col gap-1 py-2.5 sm:flex-row sm:items-center sm:justify-between",
+                    isActive && "bg-cyan-500/5",
                   )}
-                  <Button
+                >
+                  <button
                     type="button"
-                    size="sm"
-                    variant="ghost"
+                    className="flex flex-col text-left"
                     onClick={() => onLoad(row.id)}
                   >
-                    <ExternalLink size={12} className="mr-1" />
-                    Open
-                  </Button>
+                    <span className="text-sm font-medium text-[var(--text-primary)]">
+                      {row.repo_name}{" "}
+                      <span className="font-mono text-[10px] text-[var(--text-muted)]">
+                        {row.commit_sha?.slice(0, 8) ?? ""}
+                      </span>
+                    </span>
+                    <span className="text-[11px] text-[var(--text-muted)]">
+                      {new Date(row.created_at).toLocaleString()} ·{" "}
+                      {row.status} · {formatRuntime(row.runtime_ms)} ·{" "}
+                      {row.files_scanned.toLocaleString()} files
+                    </span>
+                  </button>
+                  <div className="flex items-center gap-2">
+                    {row.status === "failed" && row.error_message && (
+                      <span className="font-mono text-[10px] text-red-300">
+                        {row.error_message.slice(0, 60)}
+                      </span>
+                    )}
+                    {onOpenTimeline && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() =>
+                              onOpenTimeline(row.repo_path, row.repo_name)
+                            }
+                          >
+                            <History size={12} className="mr-1" />
+                            Timeline
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          See every saved unpack for this repo.
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onLoad(row.id)}
+                    >
+                      <ExternalLink size={12} className="mr-1" />
+                      Open
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onDelete(row.id)}
+                      aria-label="Delete report"
+                    >
+                      <Trash2 size={12} />
+                    </Button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {isTimeline && (
+          <div className="mt-4 flex flex-col items-start gap-2 rounded-md border border-dashed border-[var(--cv-line)] bg-[var(--bg-raised)]/40 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-xs text-[var(--text-secondary)]">
+              <div className="font-medium text-[var(--text-primary)]">
+                Backfill from git history
+              </div>
+              <div className="mt-0.5">
+                Check out historic commits and regenerate briefs for each —
+                coming in a follow-up.
+              </div>
+            </div>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="inline-flex">
                   <Button
                     type="button"
                     size="sm"
-                    variant="ghost"
-                    onClick={() => onDelete(row.id)}
-                    aria-label="Delete report"
+                    variant="outline"
+                    disabled
                   >
-                    <Trash2 size={12} />
+                    <GitCommit size={14} className="mr-1.5" />
+                    Generate snapshot history
                   </Button>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>
+                Coming soon — auto-regen briefs at historic commits.
+              </TooltipContent>
+            </Tooltip>
+          </div>
+        )}
       </CardContent>
     </Card>
+  );
+}
+
+function TimelineRows({
+  rows,
+  activeId,
+  onLoad,
+  onDelete,
+}: {
+  rows: UnpackReportSummary[];
+  activeId?: string;
+  onLoad: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  const groups = useMemo(() => groupTimelineByDate(rows), [rows]);
+  return (
+    <div className="relative pl-7">
+      <span
+        aria-hidden
+        className="pointer-events-none absolute bottom-3 left-[11px] top-3 w-px bg-gradient-to-b from-[var(--cv-accent)]/40 via-[var(--cv-line)] to-[var(--cv-line)]/40"
+      />
+      {groups.map((group) => (
+        <section key={group.label} className="mb-5 last:mb-0">
+          <header className="relative mb-2 flex items-center gap-2">
+            <span
+              aria-hidden
+              className="absolute -left-[26px] inline-flex h-3 w-3 items-center justify-center rounded-full border-2 border-[var(--cv-accent)]/70 bg-[var(--bg-surface)]"
+            />
+            <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--text-secondary)]">
+              {group.label}
+            </span>
+            <span className="font-mono text-[10px] text-[var(--text-muted)]">
+              ·  {group.rows.length}{" "}
+              {group.rows.length === 1 ? "unpack" : "unpacks"}
+            </span>
+          </header>
+          <ul className="space-y-1.5">
+            {group.rows.map((row) => (
+              <TimelineRow
+                key={row.id}
+                row={row}
+                isActive={row.id === activeId}
+                onLoad={onLoad}
+                onDelete={onDelete}
+              />
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function TimelineRow({
+  row,
+  isActive,
+  onLoad,
+  onDelete,
+}: {
+  row: UnpackReportSummary;
+  isActive: boolean;
+  onLoad: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  const kind = timelineStatusKind(row.status);
+  const StatusIcon =
+    kind === "failed"
+      ? AlertTriangle
+      : kind === "pending"
+        ? Loader2
+        : CheckCircle2;
+  const statusColor =
+    kind === "failed"
+      ? "text-red-300"
+      : kind === "pending"
+        ? "text-cyan-300"
+        : "text-emerald-400";
+  const dotBorder =
+    kind === "failed"
+      ? "border-red-400 bg-red-500/30"
+      : kind === "pending"
+        ? "border-cyan-400 bg-cyan-500/30"
+        : "border-emerald-400 bg-emerald-500/30";
+  const time = new Date(row.created_at).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const sha = row.commit_sha?.slice(0, 8) ?? null;
+
+  return (
+    <li
+      className={cn(
+        "group relative rounded-md border px-3 py-2 transition-colors",
+        isActive
+          ? "border-cyan-500/40 bg-cyan-500/5"
+          : "border-transparent hover:border-[var(--cv-line)] hover:bg-[var(--bg-raised)]/50",
+      )}
+    >
+      <span
+        aria-hidden
+        className={cn(
+          "absolute -left-[22px] top-3.5 h-2.5 w-2.5 rounded-full border-2",
+          dotBorder,
+          isActive && "ring-2 ring-cyan-500/40 ring-offset-1 ring-offset-[var(--bg-surface)]",
+        )}
+      />
+      <button
+        type="button"
+        className="flex w-full items-center gap-3 text-left"
+        onClick={() => onLoad(row.id)}
+      >
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+            <StatusIcon
+              size={12}
+              className={cn(
+                statusColor,
+                kind === "pending" && "animate-spin",
+              )}
+            />
+            <span className="font-medium text-[var(--text-primary)]">
+              {time}
+            </span>
+            {sha && (
+              <span className="rounded border border-[var(--cv-line)] bg-[var(--bg-raised)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-muted)]">
+                {sha}
+              </span>
+            )}
+            <span className="rounded border border-[var(--cv-line)] bg-[var(--bg-raised)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-muted)]">
+              {formatRuntime(row.runtime_ms)}
+            </span>
+            <span className="font-mono text-[10px] text-[var(--text-muted)]">
+              {row.files_scanned.toLocaleString()} files
+            </span>
+            {row.agent_used && (
+              <span className="font-mono text-[10px] text-[var(--text-muted)]">
+                · {row.agent_used}
+              </span>
+            )}
+          </div>
+          {kind === "failed" && row.error_message && (
+            <div className="mt-1 truncate font-mono text-[10px] text-red-300/80">
+              {row.error_message.slice(0, 120)}
+            </div>
+          )}
+        </div>
+        <ChevronRight
+          size={14}
+          className="shrink-0 text-[var(--text-muted)] opacity-0 transition-opacity group-hover:opacity-100"
+        />
+      </button>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete(row.id);
+        }}
+        aria-label="Delete report"
+        className="absolute right-1.5 top-1.5 rounded p-1 text-[var(--text-muted)] opacity-0 transition hover:bg-red-500/10 hover:text-red-300 group-hover:opacity-100"
+      >
+        <Trash2 size={12} />
+      </button>
+    </li>
   );
 }
