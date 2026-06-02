@@ -139,8 +139,11 @@ pub struct ReportSection {
 pub struct UnpackReport {
     pub system_map: Option<ReportSection>,
     pub feature_catalog: Option<ReportSection>,
+    pub data_flow: Option<ReportSection>,
     pub behavior_traces: Option<ReportSection>,
+    pub testing_signals: Option<ReportSection>,
     pub risk_map: Option<ReportSection>,
+    pub extension_points: Option<ReportSection>,
     pub agent_handoff: Option<ReportSection>,
     pub agent_prompt: Option<String>,
     pub overview: Option<String>,
@@ -1272,34 +1275,52 @@ fn infer_entrypoints(
 fn build_synthesis_prompt(inv: &RepoInventory) -> String {
     let mut buf = String::new();
     buf.push_str(
-        "You are CodeVetter Repo Unpacked. Given a deterministic repo inventory, \
-generate an evidence-backed system brief. Return ONLY valid JSON (no markdown fences, no commentary).\n\n",
+        "You are CodeVetter Repo Unpacked. You will produce a deep, evidence-backed system brief \
+for the repo described below. The inventory I've assembled is only the skeleton — your job is to \
+INVESTIGATE the repo using your file-read and search tools, then synthesise a rich brief grounded \
+in what you actually read. Return ONLY valid JSON (no markdown fences, no commentary).\n\n",
     );
+
+    buf.push_str("Investigation requirements (do these before writing claims):\n");
+    buf.push_str("- Open and read at least 12 source files. Prioritise: every listed entrypoint, the top 3 manifests, the largest source files in the top dirs, all notable configs, and any docs that describe architecture.\n");
+    buf.push_str("- Walk at least 3 user-visible flows end-to-end (e.g. \"startup\", \"primary action\", \"persistence path\") by reading the relevant files in sequence.\n");
+    buf.push_str("- Inspect tests if present. Note framework, what is covered, what isn't.\n");
+    buf.push_str("- Look for security-sensitive code paths (auth, secrets, IPC, shell-out, network, file IO outside repo root).\n");
+    buf.push_str("- Look for extension points (registries, plugin systems, command tables, routers, factory functions).\n\n");
 
     buf.push_str("Required JSON shape:\n");
     buf.push_str(r#"{
-  "overview": "1-3 sentence elevator pitch grounded in the inventory",
+  "overview": "2-4 sentence elevator pitch grounded in what you actually read — what the system does, who it's for, what's distinctive.",
   "system_map": {
-    "summary": "...",
+    "summary": "3-6 sentences naming entrypoints, the request/event flow at the highest level, runtime boundaries, storage, and key external integrations.",
     "claims": [{"claim":"...","sources":["src/main.rs","apps/desktop/src/App.tsx"],"kind":"evidence"}]
   },
-  "feature_catalog": { "summary": "...", "claims": [...] },
-  "behavior_traces":  { "summary": "...", "claims": [...] },
-  "risk_map":         { "summary": "...", "claims": [...] },
-  "agent_handoff":    { "summary": "...", "claims": [...] },
-  "agent_prompt": "Reusable prompt block future agents can paste in to onboard"
+  "feature_catalog":   { "summary": "...", "claims": [...] },
+  "data_flow":         { "summary": "...", "claims": [...] },
+  "behavior_traces":   { "summary": "...", "claims": [...] },
+  "testing_signals":   { "summary": "...", "claims": [...] },
+  "risk_map":          { "summary": "...", "claims": [...] },
+  "extension_points":  { "summary": "...", "claims": [...] },
+  "agent_handoff":     { "summary": "...", "claims": [...] },
+  "agent_prompt": "Reusable prompt block (300-700 words) future agents can paste in to onboard. Include stack, key files, conventions, danger zones, and a short 'how to make a safe change here' recipe."
 }"#);
     buf.push_str("\n\nRules:\n");
-    buf.push_str("- Every claim MUST list at least one `sources` file path that EXISTS in the file list below.\n");
-    buf.push_str("- Use `kind: \"evidence\"` when sources directly support the claim. Use `kind: \"inference\"` only when reading between the lines; mark such claims clearly.\n");
+    buf.push_str("- Every claim MUST list at least one `sources` file path that EXISTS in the file list below. Multi-file claims are encouraged — cite 2-4 sources where appropriate.\n");
+    buf.push_str("- You may append `#Lstart-end` to a source path to point at a specific line range you read (e.g. `src/main.rs#L42-58`).\n");
+    buf.push_str("- Use `kind: \"evidence\"` when sources directly support the claim. Use `kind: \"inference\"` only when reading between the lines; mark such claims clearly and use them sparingly (<20% of claims).\n");
     buf.push_str("- Do not invent files. If you cannot cite a file, omit the claim.\n");
-    buf.push_str("- Keep each section to 4-10 claims. Be concrete (\"Tauri command `analyze_blast_radius` is registered in src-tauri/src/main.rs\") not vague.\n");
-    buf.push_str("- system_map: entrypoints, modules, runtime boundaries, storage, external integrations, build/test commands.\n");
-    buf.push_str("- feature_catalog: routes, screens, Tauri/Rust commands, jobs, APIs, provider integrations — and where each is implemented.\n");
-    buf.push_str("- behavior_traces: startup, review execution, settings/provider configuration, persistence, update/release.\n");
-    buf.push_str("- risk_map: security-sensitive paths, untested critical flows, fragile coupling, dead/legacy code, hidden flags, stale docs, blast-radius hotspots.\n");
-    buf.push_str("- agent_handoff: conventions, safe edit boundaries, important files, recommended tests, known traps.\n");
-    buf.push_str("- agent_prompt: a copy-pasteable handoff prompt summarising the project for future agents.\n");
+    buf.push_str("- Target 8-15 claims per section. Each claim should be concrete and load-bearing — name functions, commands, files, env vars, types. Avoid vague restatements.\n");
+    buf.push_str("- Each section summary should be 3-6 sentences. Do not pad — say something an experienced engineer wouldn't already know from skimming the repo for 30 seconds.\n\n");
+    buf.push_str("Section briefs:\n");
+    buf.push_str("- system_map: entrypoints, modules, runtime boundaries (process/thread/IPC), storage layer (schema names, table names if you read them), external integrations, build/test commands, deployment shape.\n");
+    buf.push_str("- feature_catalog: every user-facing feature — routes, screens, CLI subcommands, Tauri/Rust commands, jobs, APIs, provider integrations. For each: where it's implemented (path), and any flag/toggle gating it.\n");
+    buf.push_str("- data_flow: how data moves through the system end-to-end. Input boundaries → transforms → state owners → output boundaries. Where state lives (memory, SQLite tables, files, KV). Sync vs async hops.\n");
+    buf.push_str("- behavior_traces: ordered walk-throughs of important flows (startup, primary action, persistence, settings load, update/release). Name the functions called in order.\n");
+    buf.push_str("- testing_signals: test framework(s), which directories hold tests, what's covered vs uncovered, fixtures/mocks used, CI integration. If there are no tests, say so plainly and point at the highest-leverage missing test.\n");
+    buf.push_str("- risk_map: security-sensitive paths, untested critical flows, fragile coupling, dead/legacy code, hidden flags, stale docs, blast-radius hotspots, places where a small change would silently break something else.\n");
+    buf.push_str("- extension_points: where new code is meant to plug in — registries, command tables, plugin/provider interfaces, route lists, factory functions, config schemas. For each, name the file and the shape of the contract.\n");
+    buf.push_str("- agent_handoff: conventions (naming, lint rules, formatting), safe edit boundaries (\"changing X almost always also requires Y\"), important files an agent must read before making changes, recommended tests to run, known traps.\n");
+    buf.push_str("- agent_prompt: a copy-pasteable handoff prompt summarising the project for future agents. Should let a fresh agent be productive without re-reading the repo.\n");
     buf.push_str("\n");
 
     buf.push_str(&format!("Repo: {}\n", inv.repo_name));
@@ -1459,8 +1480,11 @@ fn normalize_report(parsed: &Value, inv: &RepoInventory) -> UnpackReport {
     UnpackReport {
         system_map: take_section("system_map", "System Map"),
         feature_catalog: take_section("feature_catalog", "Feature Catalog"),
+        data_flow: take_section("data_flow", "Data Flow"),
         behavior_traces: take_section("behavior_traces", "Behavior Traces"),
+        testing_signals: take_section("testing_signals", "Testing Signals"),
         risk_map: take_section("risk_map", "Risk Map"),
+        extension_points: take_section("extension_points", "Extension Points"),
         agent_handoff: take_section("agent_handoff", "Agent Handoff Pack"),
         agent_prompt: parsed
             .get("agent_prompt")
@@ -1539,8 +1563,11 @@ fn render_markdown(
 
     render_section(&mut out, &report.system_map);
     render_section(&mut out, &report.feature_catalog);
+    render_section(&mut out, &report.data_flow);
     render_section(&mut out, &report.behavior_traces);
+    render_section(&mut out, &report.testing_signals);
     render_section(&mut out, &report.risk_map);
+    render_section(&mut out, &report.extension_points);
     render_section(&mut out, &report.agent_handoff);
 
     if let Some(prompt) = &report.agent_prompt {

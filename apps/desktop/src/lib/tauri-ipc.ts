@@ -1130,8 +1130,11 @@ export interface UnpackReportSection {
 export interface UnpackReport {
   system_map?: UnpackReportSection | null;
   feature_catalog?: UnpackReportSection | null;
+  data_flow?: UnpackReportSection | null;
   behavior_traces?: UnpackReportSection | null;
+  testing_signals?: UnpackReportSection | null;
   risk_map?: UnpackReportSection | null;
+  extension_points?: UnpackReportSection | null;
   agent_handoff?: UnpackReportSection | null;
   agent_prompt?: string | null;
   overview?: string | null;
