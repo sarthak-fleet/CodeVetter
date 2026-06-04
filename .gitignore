@@ -43,6 +43,7 @@ Thumbs.db
 # Test artifacts
 test-results/
 playwright-report/
+apps/desktop/synthetic-qa-artifacts/
 .playwright-mcp/
 
 # Misc

@@ -284,6 +284,34 @@ export interface CliReviewResult {
   findings_count: number;
 }
 
+// History context signals for review intent (recent commits on touched files,
+// prior agent talks, recurring failures). Read-only. Secrets excluded server-side.
+export interface RepoHistoryContext {
+  repo_path: string;
+  files_analyzed: string[];
+  skipped_sensitive?: string[];
+  recent_commits: Array<{
+    file: string;
+    sha: string;
+    subject: string;
+    date: string;
+    author?: string;
+  }>;
+  prior_agent_activity: Array<{
+    id: string;
+    agent: string;
+    date: string;
+    summary: string;
+    files?: string[];
+  }>;
+  recurring_failures: Array<{
+    file: string;
+    count: number;
+    examples?: string[];
+  }>;
+  prompt_snippet?: string;
+}
+
 export interface FixChangedFile {
   status: string;
   path: string;
@@ -382,6 +410,16 @@ export async function analyzeBlastRadius(
   diffRange: string,
 ): Promise<BlastRadiusReport> {
   return safeInvoke("analyze_blast_radius", {
+    repoPath,
+    diffRange,
+  });
+}
+
+export async function getRepoHistoryContext(
+  repoPath: string,
+  diffRange: string,
+): Promise<RepoHistoryContext> {
+  return safeInvoke("get_repo_history_context", {
     repoPath,
     diffRange,
   });
@@ -1219,4 +1257,34 @@ export async function exportRepoUnpackReport(
   format: "markdown" | "html",
 ): Promise<{ content: string; format: string }> {
   return safeInvoke("export_repo_unpack_report", { id, format });
+}
+
+// ─── Synthetic user QA ─────────────────────────────────────────────────────
+
+export interface SyntheticQaTrace {
+  final_url: string;
+  page_title: string;
+  console_errors: string[];
+}
+
+export interface SyntheticQaRunResult {
+  loop_id: string;
+  route: string;
+  goal: string;
+  pass: boolean;
+  notes: string;
+  screenshot_path: string | null;
+  duration_ms: number;
+  trace: SyntheticQaTrace;
+  error: string | null;
+}
+
+export async function runSyntheticQa(
+  baseUrl: string,
+  loopId?: string,
+): Promise<SyntheticQaRunResult> {
+  return safeInvoke("run_synthetic_qa", {
+    baseUrl,
+    loopId: loopId ?? null,
+  });
 }

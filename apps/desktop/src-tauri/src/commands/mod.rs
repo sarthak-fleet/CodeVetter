@@ -8,6 +8,7 @@ pub mod preferences;
 pub mod review;
 pub mod sessions;
 pub mod setup;
+pub mod synthetic_qa;
 pub mod talks;
 pub mod tray;
 pub mod unpack;

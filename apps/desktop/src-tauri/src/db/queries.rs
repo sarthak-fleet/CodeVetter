@@ -64,6 +64,17 @@ pub struct LocalReviewFindingRow {
     pub fingerprint: Option<String>,
 }
 
+/// Lightweight row for history signals — recurring failures from past reviews on a repo.
+/// Used by git history mining (no full finding payload needed).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct RecentRepoFinding {
+    pub file_path: Option<String>,
+    pub title: String,
+    pub severity: Option<String>,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTalkRow {
     pub id: String,
@@ -545,6 +556,32 @@ pub fn list_local_reviews_filtered(
             .collect::<Result<Vec<_>, _>>()?
     };
     Ok(results)
+}
+
+/// Recent findings for a repo (used for "recurring failure areas" history signal).
+/// Returns joined rows limited, newest first. Caller filters to specific files if desired.
+pub fn get_recent_findings_for_repo(
+    conn: &Connection,
+    repo_path: &str,
+    limit: i64,
+) -> Result<Vec<RecentRepoFinding>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT f.file_path, f.title, f.severity, r.created_at
+         FROM local_review_findings f
+         JOIN local_reviews r ON r.id = f.review_id
+         WHERE r.repo_path = ?1
+         ORDER BY r.created_at DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![repo_path, limit], |row| {
+        Ok(RecentRepoFinding {
+            file_path: row.get(0)?,
+            title: row.get(1)?,
+            severity: row.get(2)?,
+            created_at: row.get(3)?,
+        })
+    })?;
+    rows.collect()
 }
 
 pub fn get_local_review_with_findings(

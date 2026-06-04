@@ -181,6 +181,7 @@ fn main() {
             commands::git::check_github_auth,
             commands::git::sync_github_token,
             commands::git::get_git_changed_files,
+            commands::git::get_repo_history_context,
             // GitHub PR & CI
             commands::github_ops::create_pull_request,
             commands::github_ops::list_pull_requests_for_repo,
@@ -221,6 +222,8 @@ fn main() {
             commands::unpack::get_repo_unpack_report,
             commands::unpack::delete_repo_unpack_report,
             commands::unpack::export_repo_unpack_report,
+            // Synthetic user QA
+            commands::synthetic_qa::run_synthetic_qa,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

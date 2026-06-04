@@ -14,8 +14,10 @@ import {
   GitCommitHorizontal,
   GitMerge,
   GitPullRequest,
+  History,
   ListOrdered,
   Loader2,
+  MonitorPlay,
   Plus,
   RefreshCw,
   Square,
@@ -32,12 +34,22 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { trackCoreAction } from "@/lib/analytics";
-import type { BlastRadiusReport,CliReviewFinding, CliReviewResult, FileLineData,FixChangedFile, FixFindingsResult , LocalReviewRow, PullRequest } from "@/lib/tauri-ipc";
+import {
+  syntheticQaFailureFinding,
+  syntheticQaToFindingEvidence,
+} from "@/lib/synthetic-qa/apply-evidence";
+import {
+  CODEVETTER_REVIEW_SHELL,
+  SYNTHETIC_QA_LOOPS,
+} from "@/lib/synthetic-qa/loops";
+import type { SyntheticQaRunResult } from "@/lib/synthetic-qa/types";
+import type { BlastRadiusReport,CliReviewFinding, CliReviewResult, FileLineData,FixChangedFile, FixFindingsResult , LocalReviewRow, PullRequest, RepoHistoryContext } from "@/lib/tauri-ipc";
 import {
   analyzeBlastRadius,
   discardFix,
   fixFindings,
   getPreference,
+  getRepoHistoryContext,
   getReview,
   isTauriAvailable,
   listGitBranches,
@@ -48,6 +60,7 @@ import {
   readFileAroundLine,
   revertFiles,
   runCliReview,
+  runSyntheticQa,
   setPreference,
 } from "@/lib/tauri-ipc";
 import { cn } from "@/lib/utils";
@@ -471,6 +484,10 @@ export default function QuickReview() {
   const [blastLoading, setBlastLoading] = useState(false);
   const [blastError, setBlastError] = useState<string | null>(null);
 
+  // Repo history context (read-only signals for review input: commits, prior agents, recurring)
+  const [historyContext, setHistoryContext] = useState<RepoHistoryContext | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
   // Whether the current view-mode review has a known repo path (for enabling fix)
   const [viewHasRepoPath, setViewHasRepoPath] = useState(true);
 
@@ -485,6 +502,13 @@ export default function QuickReview() {
   const [codeFilePath, setCodeFilePath] = useState("");
   const [codeLanguage, setCodeLanguage] = useState("");
   const [evidenceByFinding, setEvidenceByFinding] = useState<Record<string, FindingEvidence>>({});
+
+  // Synthetic user QA (browser loop → verification evidence)
+  const [qaBaseUrl, setQaBaseUrl] = useState(CODEVETTER_REVIEW_SHELL.default_base_url);
+  const [qaLoopId, setQaLoopId] = useState(CODEVETTER_REVIEW_SHELL.id);
+  const [qaRunning, setQaRunning] = useState(false);
+  const [qaLastRun, setQaLastRun] = useState<SyntheticQaRunResult | null>(null);
+  const [qaError, setQaError] = useState<string | null>(null);
 
   // Diff range derived from selection
   const [diffRange, setDiffRange] = useState("");
@@ -524,12 +548,40 @@ export default function QuickReview() {
     }
   }, []);
 
+  // ─── History context loader (for review-input panel; read-only, per AC) ─────
+  const loadHistoryContext = useCallback(async (dir: string, range: string) => {
+    if (!dir || !range || !isTauriAvailable()) {
+      setHistoryContext(null);
+      return;
+    }
+    setHistoryLoading(true);
+    try {
+      const ctx = await getRepoHistoryContext(dir, range);
+      setHistoryContext(ctx);
+    } catch (e) {
+      // Non-fatal — panel just shows empty; review still works.
+      console.warn("[Review] history context load failed (non-fatal):", e);
+      setHistoryContext(null);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (!isTauriAvailable()) return;
     void getPreference("quick_review_last_folder")
       .then((dir) => dir ? loadFolderData(dir) : undefined)
       .catch(() => {});
   }, [loadFolderData]);
+
+  // Auto-load history signals when repo + diffRange ready (read-only panel in input)
+  useEffect(() => {
+    if (repoPath && diffRange) {
+      void loadHistoryContext(repoPath, diffRange);
+    } else {
+      setHistoryContext(null);
+    }
+  }, [repoPath, diffRange, loadHistoryContext]);
 
   // ─── Load past reviews ───────────────────────────────────────────────────
 
@@ -598,6 +650,7 @@ export default function QuickReview() {
       setSelectedBranch("");
       setDiffRange("");
       setMode("create");
+      setHistoryContext(null);
 
       await loadFolderData(dir);
 
@@ -840,6 +893,49 @@ export default function QuickReview() {
       JSON.stringify(evidenceByFinding),
     ).catch(() => {});
   }, [evidenceByFinding, result?.review_id]);
+
+  const handleRunSyntheticQa = useCallback(async () => {
+    if (!isTauriAvailable()) {
+      setQaError("Synthetic QA requires the CodeVetter desktop app (Tauri).");
+      return;
+    }
+    setQaRunning(true);
+    setQaError(null);
+    try {
+      const run = await runSyntheticQa(qaBaseUrl, qaLoopId);
+      setQaLastRun(run);
+      if (!run.pass) {
+        trackCoreAction("review_run");
+      }
+    } catch (err) {
+      setQaError(err instanceof Error ? err.message : String(err));
+      setQaLastRun(null);
+    } finally {
+      setQaRunning(false);
+    }
+  }, [qaBaseUrl, qaLoopId]);
+
+  const applyQaToSelectedFinding = useCallback(() => {
+    if (qaLastRun == null || selectedFindingIdx === null) return;
+    updateFindingEvidence(selectedFindingIdx, syntheticQaToFindingEvidence(qaLastRun));
+  }, [qaLastRun, selectedFindingIdx, updateFindingEvidence]);
+
+  const addQaFailureFinding = useCallback(() => {
+    if (qaLastRun == null || !result || qaLastRun.pass) return;
+    const finding = syntheticQaFailureFinding(qaLastRun);
+    const newIdx = result.findings.length;
+    setResult({
+      ...result,
+      findings: [...result.findings, finding],
+      findings_count: (result.findings_count ?? result.findings.length) + 1,
+    });
+    const key = findingEvidenceKey(finding, newIdx);
+    setEvidenceByFinding((prev) => ({
+      ...prev,
+      [key]: syntheticQaToFindingEvidence(qaLastRun),
+    }));
+    setSelectedFindingIdx(newIdx);
+  }, [qaLastRun, result]);
 
   // ─── Fix handlers ───────────────────────────────────────────────────────
 
@@ -1467,6 +1563,108 @@ export default function QuickReview() {
                       </p>
                     </div>
                   )}
+                  <div
+                    className="mt-6 border-t border-[var(--cv-line)] pt-5"
+                    data-testid="synthetic-qa-panel"
+                  >
+                    <div className="mb-3 flex items-center gap-2">
+                      <MonitorPlay size={14} className="text-[var(--cv-accent)]" />
+                      <div className="cv-label text-slate-300">Synthetic user QA</div>
+                    </div>
+                    <p className="mb-3 text-[10px] leading-4 text-slate-500">
+                      Run a browser loop against a local dev server and attach pass/fail
+                      evidence to the selected finding.
+                    </p>
+                    <label className="block space-y-1">
+                      <span className="cv-label">Base URL</span>
+                      <input
+                        value={qaBaseUrl}
+                        onChange={(event) => setQaBaseUrl(event.target.value)}
+                        placeholder="http://localhost:1420"
+                        className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 font-mono text-xs text-slate-200 outline-none placeholder:text-slate-700 focus:border-[var(--cv-accent)]"
+                      />
+                    </label>
+                    <label className="mt-2 block space-y-1">
+                      <span className="cv-label">Loop</span>
+                      <select
+                        value={qaLoopId}
+                        onChange={(event) => setQaLoopId(event.target.value)}
+                        className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 text-xs text-slate-200 outline-none focus:border-[var(--cv-accent)]"
+                      >
+                        {SYNTHETIC_QA_LOOPS.map((loop) => (
+                          <option key={loop.id} value={loop.id}>
+                            {loop.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="mt-3 w-full border-[var(--cv-line)] text-xs"
+                      disabled={qaRunning}
+                      onClick={() => void handleRunSyntheticQa()}
+                    >
+                      {qaRunning ? (
+                        <>
+                          <Loader2 size={14} className="animate-spin" />
+                          Running loop…
+                        </>
+                      ) : (
+                        <>
+                          <MonitorPlay size={14} />
+                          Run QA loop
+                        </>
+                      )}
+                    </Button>
+                    {qaError && (
+                      <p className="mt-2 text-[10px] text-red-400">{qaError}</p>
+                    )}
+                    {qaLastRun && (
+                      <div
+                        className={cn(
+                          "mt-3 rounded-lg border p-2 text-[10px] leading-4",
+                          qaLastRun.pass
+                            ? "border-emerald-500/20 bg-emerald-500/[0.04] text-emerald-300"
+                            : "border-red-500/20 bg-red-500/[0.04] text-red-300",
+                        )}
+                      >
+                        <div className="font-mono uppercase tracking-wider">
+                          {qaLastRun.pass ? "PASS" : "FAIL"} · {qaLastRun.duration_ms}ms
+                        </div>
+                        <p className="mt-1 text-slate-400">{qaLastRun.notes}</p>
+                        {qaLastRun.screenshot_path && (
+                          <p className="mt-1 font-mono text-slate-500">
+                            {qaLastRun.screenshot_path}
+                          </p>
+                        )}
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 px-2 text-[10px]"
+                            disabled={selectedFindingIdx === null}
+                            onClick={applyQaToSelectedFinding}
+                          >
+                            Apply to selected finding
+                          </Button>
+                          {!qaLastRun.pass && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 px-2 text-[10px] text-yellow-400"
+                              onClick={addQaFailureFinding}
+                            >
+                              Add QA finding
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                   {selectedFindingIdx !== null && (
                     <div className="mt-6 border-t border-[var(--cv-line)] pt-5">
                       <div className="mb-3 flex items-center gap-2">
@@ -2081,6 +2279,56 @@ export default function QuickReview() {
                   rows={2}
                 />
               </div>
+
+              {/* Read-only history context panel (review-input section for one repo path).
+                  Shows first signals (commits + prior agents + recurring) for the diff's files.
+                  Secrets/env excluded server-side. Compact snippet also used in prompt (no bloat). */}
+              {repoPath && diffRange && (
+                <div className="space-y-1 border border-[var(--cv-line)] bg-[#07080a] p-2 text-xs">
+                  <div className="flex items-center gap-1.5 text-slate-400">
+                    <History size={12} />
+                    <span className="font-medium">History context (read-only — mined for this diff)</span>
+                    {historyLoading && <Loader2 size={12} className="animate-spin ml-1" />}
+                  </div>
+                  {!historyLoading && historyContext && (
+                    <div className="space-y-1 pl-1 text-[10px] text-slate-300">
+                      {historyContext.recent_commits && historyContext.recent_commits.length > 0 && (
+                        <div>
+                          <span className="text-slate-500">Recent commits:</span>
+                          <ul className="mt-0.5 list-disc pl-4 font-mono text-[9px] text-slate-400">
+                            {historyContext.recent_commits.slice(0, 4).map((c, i) => (
+                              <li key={i}>{c.file}: {c.sha} {c.subject} ({c.date})</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {historyContext.prior_agent_activity && historyContext.prior_agent_activity.length > 0 && (
+                        <div>
+                          <span className="text-slate-500">Prior agent:</span>{" "}
+                          {historyContext.prior_agent_activity[0].summary || "(summary)"}
+                        </div>
+                      )}
+                      {historyContext.recurring_failures && historyContext.recurring_failures.length > 0 && (
+                        <div>
+                          <span className="text-slate-500">Recurring:</span>{" "}
+                          {historyContext.recurring_failures.map((r, i) => `${r.file}(${r.count})`).join(", ")}
+                        </div>
+                      )}
+                      {historyContext.prompt_snippet && (
+                        <div className="text-[9px] text-slate-500">
+                          Prompt snippet: {historyContext.prompt_snippet.length} chars (injected)
+                        </div>
+                      )}
+                      {historyContext.skipped_sensitive && historyContext.skipped_sensitive.length > 0 && (
+                        <div className="text-amber-400/70">Skipped secret/env: {historyContext.skipped_sensitive.join(", ")}</div>
+                      )}
+                    </div>
+                  )}
+                  {!historyLoading && !historyContext && (
+                    <div className="pl-1 text-[10px] text-slate-500">No prior signals for these files (or first review).</div>
+                  )}
+                </div>
+              )}
 
               {/* Review button */}
               <Button

@@ -393,18 +393,33 @@ pub async fn run_cli_review(
 
     let conventions_section = read_repo_conventions(&repo_path);
 
+    // History context (first signals): recent commits on touched files + prior agent summaries + recurring failures.
+    // Computed here so the *reviewer agent* sees intent ("why touched files changed before") before judging the new diff.
+    // Uses same changed_files list; compact + capped inside the builder. Secrets excluded in git.rs.
+    let history_section = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let h = crate::commands::git::build_compact_history_section_for_prompt(
+            &repo_path,
+            &changed_files,
+            &conn,
+        );
+        drop(conn);
+        h
+    };
+
     let base_prompt = format!(
         r#"You are a senior code reviewer for an experienced engineer. Find *real* issues — security holes, correctness bugs, regression risk, broken contracts. Skip style nitpicks and speculative concerns.
 
 Project: {project_description}
 Change: {change_description}
-{conventions_section}{files_section}{blast_section}
+{conventions_section}{files_section}{blast_section}{history_section}
 How to review:
 1. Read the diff carefully. You have file-read tools — use them when a finding's validity depends on context the diff doesn't show (callers, tests, related files, imports, prior implementation).
 2. Verify each potential issue against the actual code before reporting. If you cannot cite specific lines that prove the problem, drop the finding — or, if the signal is real but unverified, lower confidence honestly instead of hiding the uncertainty.
 3. Use the blast-radius data above to weight severity: a behavior change to a symbol with 6+ callers should be at least medium severity unless the change is provably backward-compatible.
 4. Skip nitpicks (formatting, naming preference, missing comments) unless they will cause real bugs or break a workflow.
 5. Repo conventions above are authoritative. Drop findings that contradict them.
+6. History signals (if present) explain prior commits and agent work on the touched files — use them to understand *intent* and avoid re-flagging deliberate past decisions. Only call out if the new diff re-opens an old problem.
 
 Output format:
 
