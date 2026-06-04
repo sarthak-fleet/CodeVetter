@@ -1,0 +1,11 @@
+# Cloudflare Pages cache headers — fleet performance standard
+# HTML routes: short browser TTL, longer edge TTL, SWR for cheap revalidation.
+/
+  Cache-Control: public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800
+
+/*.html
+  Cache-Control: public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800
+
+# Hashed Next.js static assets are immutable — let browsers and edge cache forever.
+/_next/static/*
+  Cache-Control: public, max-age=31536000, immutable
