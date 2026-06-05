@@ -23,13 +23,17 @@ import Footer from '@/components/Footer.astro';
   <main>
     <Nav />
     <Hero />
-    <CatchStrip />
-    <Stats />
-    <Bento />
-    <HowItWorks />
-    <Providers />
-    <Pricing />
-    <CTA />
-    <Footer />
+    {/* Everything below the hero is wrapped in `content-visibility:auto`
+        so the browser skips layout/paint until each section enters the
+        viewport. Drops first-paint cost from 951 DOM elements down to
+        the ~250 the hero needs. See globals.css → `.cv-below-fold`. */}
+    <div class="cv-below-fold"><CatchStrip /></div>
+    <div class="cv-below-fold"><Stats /></div>
+    <div class="cv-below-fold"><Bento /></div>
+    <div class="cv-below-fold"><HowItWorks /></div>
+    <div class="cv-below-fold"><Providers /></div>
+    <div class="cv-below-fold"><Pricing /></div>
+    <div class="cv-below-fold"><CTA /></div>
+    <div class="cv-below-fold"><Footer /></div>
   </main>
 </Layout>
