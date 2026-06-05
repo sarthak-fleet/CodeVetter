@@ -104,7 +104,7 @@ jobs:
 
           VERSION="${TAG#v}"
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          URL="https://github.com/sarthakagrawal927/CodeVetter/releases/download/$TAG/CodeVetter_aarch64.app.tar.gz"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG/CodeVetter_aarch64.app.tar.gz"
           jq -n \
             --arg version "$VERSION" \
             --arg pub_date "$PUB_DATE" \
@@ -125,4 +125,4 @@ jobs:
           gh release upload "$TAG" \
             "$SIG_FILE#CodeVetter_aarch64.app.tar.gz.sig" \
             "latest.json" \
-            --clobber --repo sarthakagrawal927/CodeVetter
+            --clobber --repo "$GITHUB_REPOSITORY"
