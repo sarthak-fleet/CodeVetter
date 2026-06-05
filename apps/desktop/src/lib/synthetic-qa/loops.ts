@@ -10,7 +10,19 @@ export const CODEVETTER_REVIEW_SHELL: SyntheticQaLoopDef = {
   default_base_url: "http://localhost:1420",
 };
 
-export const SYNTHETIC_QA_LOOPS: SyntheticQaLoopDef[] = [CODEVETTER_REVIEW_SHELL];
+export const GENERIC_PAGE_SMOKE: SyntheticQaLoopDef = {
+  id: "generic-page-smoke",
+  label: "Generic page smoke",
+  route: "/",
+  goal:
+    "Open the selected route in a real browser, confirm the page renders, and collect console errors.",
+  default_base_url: "http://localhost:1420",
+};
+
+export const SYNTHETIC_QA_LOOPS: SyntheticQaLoopDef[] = [
+  CODEVETTER_REVIEW_SHELL,
+  GENERIC_PAGE_SMOKE,
+];
 
 export function getSyntheticQaLoop(id: string): SyntheticQaLoopDef | undefined {
   return SYNTHETIC_QA_LOOPS.find((loop) => loop.id === id);

@@ -1,9 +1,11 @@
-use crate::db::queries::{self, LocalReviewInput, ActivityInput};
+use crate::db::queries::{self, ActivityInput, LocalReviewInput};
 use crate::talk;
 use crate::DbState;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::process::Command as StdCommand;
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command as StdCommand, Stdio};
 use tauri::{Emitter, Manager, State};
 
 /// Resolve a CLI binary (e.g. "claude", "gemini") to an absolute path.
@@ -63,7 +65,9 @@ fn read_repo_conventions(repo_path: &str) -> String {
         if !seen.insert(key) {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         let trimmed = content.trim();
         if trimmed.is_empty() {
             continue;
@@ -114,6 +118,405 @@ fn maybe_prepend_talk_context(
         }
     }
     prompt.to_string()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReviewSpecialist {
+    id: &'static str,
+    name: &'static str,
+    focus: &'static str,
+    checks: &'static [&'static str],
+}
+
+const PRODUCT_SAFETY_SPECIALIST: ReviewSpecialist = ReviewSpecialist {
+    id: "product-safety",
+    name: "Product Safety",
+    focus: "User-facing regressions, broken flows, data loss, confusing states, and behavior changes that violate the described goal.",
+    checks: &[
+        "Flag behavior changes that can break an existing user workflow.",
+        "Check loading, empty, error, and permission states for touched user-facing screens.",
+        "Prefer concrete reproduction paths over style commentary.",
+    ],
+};
+
+const SECURITY_BOUNDARY_SPECIALIST: ReviewSpecialist = ReviewSpecialist {
+    id: "security-boundary",
+    name: "Security Boundary",
+    focus: "Auth, authorization, secret handling, trust boundaries, injection, shell/network execution, and unsafe IPC or persistence boundaries.",
+    checks: &[
+        "Verify server-side or backend enforcement, not just hidden client controls.",
+        "Flag secrets, tokens, PII, prompts, or credentials that can leak into logs, storage, analytics, or model calls.",
+        "Check untrusted input before database, shell, filesystem, network, IPC, or model calls.",
+    ],
+};
+
+const AGENT_HANDOFF_SPECIALIST: ReviewSpecialist = ReviewSpecialist {
+    id: "agent-handoff",
+    name: "Agent Handoff",
+    focus: "Agent-written-code failure modes: over-editing, silent scope drift, missing verification, fake-green summaries, brittle fixes, and incomplete handoff.",
+    checks: &[
+        "Call out missing tests or verification commands the next agent must run.",
+        "Prefer findings with file paths, line numbers, and a bounded fix.",
+        "Separate real blockers from optional cleanup so agents do not waste context.",
+    ],
+};
+
+const GENERAL_REVIEW_SPECIALIST: ReviewSpecialist = ReviewSpecialist {
+    id: "general",
+    name: "General Code Review",
+    focus: "Correctness, security, regression risk, broken contracts, and changed behavior that can realistically break the described goal.",
+    checks: &[
+        "Find real correctness, security, and regression bugs.",
+        "Use repo conventions, blast radius, and history context before reporting.",
+        "Skip style-only or speculative findings.",
+    ],
+};
+
+#[derive(Debug, Clone)]
+struct ReviewPlan {
+    tier: &'static str,
+    mode: &'static str,
+    changed_lines: usize,
+    sensitive_paths: Vec<String>,
+    specialists: Vec<ReviewSpecialist>,
+    uses_coordinator: bool,
+}
+
+fn changed_line_count(diff: &str) -> usize {
+    diff.lines()
+        .filter(|line| {
+            (line.starts_with('+') && !line.starts_with("+++ "))
+                || (line.starts_with('-') && !line.starts_with("--- "))
+        })
+        .count()
+}
+
+fn is_sensitive_review_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let sensitive_terms = [
+        "auth",
+        "login",
+        "session",
+        "token",
+        "secret",
+        "credential",
+        "password",
+        "permission",
+        "rbac",
+        "acl",
+        "migration",
+        "schema",
+        "sql",
+        "ipc",
+        "invoke",
+        "command",
+        "shell",
+        "exec",
+        "network",
+        "webhook",
+        "billing",
+        "payment",
+    ];
+    sensitive_terms.iter().any(|term| lower.contains(term))
+}
+
+fn build_review_plan(diff: &str, changed_files: &[String]) -> ReviewPlan {
+    let changed_lines = changed_line_count(diff);
+    let sensitive_paths: Vec<String> = changed_files
+        .iter()
+        .filter(|path| is_sensitive_review_path(path))
+        .cloned()
+        .collect();
+
+    if changed_lines <= 10 && sensitive_paths.is_empty() {
+        return ReviewPlan {
+            tier: "trivial",
+            mode: "single-pass",
+            changed_lines,
+            sensitive_paths,
+            specialists: vec![GENERAL_REVIEW_SPECIALIST],
+            uses_coordinator: false,
+        };
+    }
+
+    if changed_lines <= 100 && sensitive_paths.is_empty() {
+        return ReviewPlan {
+            tier: "lite",
+            mode: "specialist-lite",
+            changed_lines,
+            sensitive_paths,
+            specialists: vec![PRODUCT_SAFETY_SPECIALIST, AGENT_HANDOFF_SPECIALIST],
+            uses_coordinator: false,
+        };
+    }
+
+    ReviewPlan {
+        tier: if sensitive_paths.is_empty() {
+            "full"
+        } else {
+            "full-sensitive"
+        },
+        mode: "specialist-full",
+        changed_lines,
+        sensitive_paths,
+        specialists: vec![
+            PRODUCT_SAFETY_SPECIALIST,
+            SECURITY_BOUNDARY_SPECIALIST,
+            AGENT_HANDOFF_SPECIALIST,
+        ],
+        uses_coordinator: true,
+    }
+}
+
+fn build_specialist_block(specialist: &ReviewSpecialist, plan: &ReviewPlan) -> String {
+    let checks = specialist
+        .checks
+        .iter()
+        .map(|check| format!("- {check}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let sensitive = if plan.sensitive_paths.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nSensitive paths forcing full review:\n{}\n",
+            plan.sensitive_paths
+                .iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+
+    format!(
+        r#"Review tier: {tier}
+Review mode: {mode}
+Changed lines: {changed_lines}
+Specialist pass: {name} ({id})
+Specialist focus: {focus}
+Specialist checks:
+{checks}{sensitive}
+Report only issues in this specialist's scope unless a critical cross-scope defect is obvious."#,
+        tier = plan.tier,
+        mode = plan.mode,
+        changed_lines = plan.changed_lines,
+        name = specialist.name,
+        id = specialist.id,
+        focus = specialist.focus,
+        checks = checks,
+        sensitive = sensitive,
+    )
+}
+
+fn build_review_prompt(
+    project_description: &str,
+    change_description: &str,
+    conventions_section: &str,
+    files_section: &str,
+    blast_section: &str,
+    history_section: &str,
+    specialist_block: &str,
+    diff_text: &str,
+) -> String {
+    format!(
+        r#"You are a senior code reviewer for an experienced engineer. Find *real* issues — security holes, correctness bugs, regression risk, broken contracts. Skip style nitpicks and speculative concerns.
+
+Project: {project_description}
+Change: {change_description}
+{specialist_block}
+{conventions_section}{files_section}{blast_section}{history_section}
+How to review:
+1. Read the diff carefully. You have file-read tools — use them when a finding's validity depends on context the diff doesn't show (callers, tests, related files, imports, prior implementation).
+2. Verify each potential issue against the actual code before reporting. If you cannot cite specific lines that prove the problem, drop the finding — or, if the signal is real but unverified, lower confidence honestly instead of hiding the uncertainty.
+3. Use the blast-radius data above to weight severity: a behavior change to a symbol with 6+ callers should be at least medium severity unless the change is provably backward-compatible.
+4. Skip nitpicks (formatting, naming preference, missing comments) unless they will cause real bugs or break a workflow.
+5. Repo conventions above are authoritative. Drop findings that contradict them.
+6. History signals (if present) explain prior commits and agent work on the touched files — use them to understand *intent* and avoid re-flagging deliberate past decisions. Only call out if the new diff re-opens an old problem.
+
+Output format:
+
+Think through the review first (you may use tools and write reasoning notes). Then output **exactly one** ```json fenced block as the very LAST thing in your response, matching this shape. Do not emit any other ```json fenced blocks anywhere — examples in your reasoning should be unfenced or use a different language tag.
+
+JSON shape (literal text, not a fenced example):
+{{"findings":[{{"severity":"critical|high|medium|low","title":"...","summary":"... — include the specific lines that prove the problem","suggestion":"...","filePath":"...","line":42,"confidence":0.9}}],"score":75,"summary":"Overall assessment","talk":{{"files_read":["src/file.ts"],"files_modified":[],"actions_summary":"What you reviewed and found","unfinished_work":null,"key_decisions":"Important observations about the code","recommended_next_steps":"What should happen next"}}}}
+
+Rules:
+- severity must be one of: critical, high, medium, low
+- confidence is 0.0-1.0 — be honest; downgrade rather than overclaim
+- line is optional (null if unknown); filePath relative to repo root
+- score is 0-100 (100 = perfect)
+- Each finding's `summary` must reference the specific line(s) or symbol(s) that prove the problem
+- The "talk" object captures context for the next review/fix run — populate `files_read` with anything you actually opened
+
+Diff:
+{diff_text}"#
+    )
+}
+
+fn run_agent_json(
+    cli_path: &str,
+    cli_cmd: &str,
+    repo_path: &str,
+    prompt: &str,
+) -> Result<(Value, String), String> {
+    let cli_output = StdCommand::new(cli_path)
+        .args(["-p", prompt])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to spawn {cli_cmd} (resolved to {cli_path}): {e}"))?;
+
+    if !cli_output.status.success() {
+        let stderr = String::from_utf8_lossy(&cli_output.stderr);
+        return Err(format!("{cli_cmd} failed: {stderr}"));
+    }
+
+    let raw_output = String::from_utf8_lossy(&cli_output.stdout).to_string();
+    let json_str = extract_json_from_output(&raw_output)
+        .ok_or_else(|| format!("Could not find JSON in {cli_cmd} output"))?;
+    let parsed: Value =
+        serde_json::from_str(&json_str).map_err(|e| format!("Failed to parse JSON: {e}"))?;
+
+    Ok((parsed, raw_output))
+}
+
+fn findings_from(parsed: &Value) -> Vec<Value> {
+    parsed
+        .get("findings")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn score_from_findings(parsed: &Value, findings: &[Value]) -> f64 {
+    parsed
+        .get("score")
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| {
+            let mut s: f64 = 100.0;
+            for f in findings {
+                let sev = f.get("severity").and_then(|v| v.as_str()).unwrap_or("low");
+                s += match sev {
+                    "critical" => -20.0,
+                    "high" => -10.0,
+                    "medium" => -5.0,
+                    "low" => -2.0,
+                    _ => -1.0,
+                };
+            }
+            s.max(0.0)
+        })
+}
+
+fn finding_dedupe_key(finding: &Value) -> String {
+    let file = finding
+        .get("filePath")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let line = finding
+        .get("line")
+        .and_then(|v| v.as_i64())
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    let title = finding
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    format!("{file}:{line}:{title}")
+}
+
+fn severity_rank(severity: &str) -> i32 {
+    match severity {
+        "critical" => 4,
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 0,
+    }
+}
+
+fn dedupe_findings(findings: Vec<Value>) -> Vec<Value> {
+    let mut by_key: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    for finding in findings {
+        let key = finding_dedupe_key(&finding);
+        if key == "::" {
+            by_key.insert(uuid::Uuid::new_v4().to_string(), finding);
+            continue;
+        }
+        let replace = by_key
+            .get(&key)
+            .map(|existing| {
+                let current_rank = finding
+                    .get("severity")
+                    .and_then(|v| v.as_str())
+                    .map(severity_rank)
+                    .unwrap_or(0);
+                let existing_rank = existing
+                    .get("severity")
+                    .and_then(|v| v.as_str())
+                    .map(severity_rank)
+                    .unwrap_or(0);
+                current_rank > existing_rank
+            })
+            .unwrap_or(true);
+        if replace {
+            by_key.insert(key, finding);
+        }
+    }
+
+    let mut deduped: Vec<Value> = by_key.into_values().collect();
+    deduped.sort_by(|a, b| {
+        let ar = a
+            .get("severity")
+            .and_then(|v| v.as_str())
+            .map(severity_rank)
+            .unwrap_or(0);
+        let br = b
+            .get("severity")
+            .and_then(|v| v.as_str())
+            .map(severity_rank)
+            .unwrap_or(0);
+        br.cmp(&ar)
+    });
+    deduped
+}
+
+fn build_coordinator_prompt(
+    project_description: &str,
+    change_description: &str,
+    plan: &ReviewPlan,
+    specialist_outputs: &[Value],
+) -> String {
+    let outputs = serde_json::to_string_pretty(specialist_outputs).unwrap_or_else(|_| "[]".into());
+    format!(
+        r#"You are the coordinator for a CodeVetter specialist review. Deduplicate and rank findings from specialist reviewers. Keep only real, verified issues. Drop duplicates, style-only comments, and findings that lack a concrete file/symbol/line basis.
+
+Project: {project_description}
+Change: {change_description}
+Review tier: {tier}
+Review mode: {mode}
+Changed lines: {changed_lines}
+
+Specialist outputs:
+{outputs}
+
+Output exactly one final ```json fenced block as the last thing in your response.
+
+JSON shape:
+{{"findings":[{{"severity":"critical|high|medium|low","title":"...","summary":"... — include the specific lines that prove the problem","suggestion":"...","filePath":"...","line":42,"confidence":0.9}}],"score":75,"summary":"Coordinator summary including what was deduplicated and why the remaining findings matter","talk":{{"files_read":[],"files_modified":[],"actions_summary":"Coordinated specialist findings for {mode} review","unfinished_work":null,"key_decisions":"Why final findings were kept or dropped","recommended_next_steps":"What should happen next"}}}}
+
+Rules:
+- severity must be one of: critical, high, medium, low
+- confidence is 0.0-1.0
+- score is 0-100
+- The summary must mention the review tier and whether deduplication changed the finding set."#,
+        tier = plan.tier,
+        mode = plan.mode,
+        changed_lines = plan.changed_lines,
+        outputs = outputs,
+    )
 }
 
 /// Finding shape received from the frontend (review-core running in webview).
@@ -218,8 +621,7 @@ pub async fn save_review(
         status: Some("completed".to_string()),
     };
 
-    let review_id = queries::create_local_review(&conn, &input)
-        .map_err(|e| e.to_string())?;
+    let review_id = queries::create_local_review(&conn, &input).map_err(|e| e.to_string())?;
 
     // Insert findings
     for f in &findings {
@@ -264,7 +666,9 @@ pub async fn save_review(
             event_type: Some("review_completed".to_string()),
             summary: Some(format!(
                 "Review completed for {}: score={:.0}, {} findings",
-                source_label, score, findings.len()
+                source_label,
+                score,
+                findings.len()
             )),
             metadata: Some(json!({"review_id": review_id}).to_string()),
         },
@@ -337,7 +741,9 @@ pub async fn run_cli_review(
             end -= 1;
         }
         diff_text.truncate(end);
-        diff_text.push_str("\n\n[DIFF TRUNCATED at 100KB — see file list above for the full change surface]");
+        diff_text.push_str(
+            "\n\n[DIFF TRUNCATED at 100KB — see file list above for the full change surface]",
+        );
     }
 
     let changed_files: Vec<String> = StdCommand::new("git")
@@ -379,11 +785,12 @@ pub async fn run_cli_review(
         header
     };
 
-    let blast_summary = crate::commands::blast_radius::compute_blast_radius(&repo_path, &diff_range)
-        .ok()
-        .as_ref()
-        .and_then(crate::commands::blast_radius::summarize_for_prompt)
-        .unwrap_or_default();
+    let blast_summary =
+        crate::commands::blast_radius::compute_blast_radius(&repo_path, &diff_range)
+            .ok()
+            .as_ref()
+            .and_then(crate::commands::blast_radius::summarize_for_prompt)
+            .unwrap_or_default();
 
     let blast_section = if blast_summary.is_empty() {
         String::new()
@@ -407,80 +814,134 @@ pub async fn run_cli_review(
         h
     };
 
-    let base_prompt = format!(
-        r#"You are a senior code reviewer for an experienced engineer. Find *real* issues — security holes, correctness bugs, regression risk, broken contracts. Skip style nitpicks and speculative concerns.
+    let plan = build_review_plan(&diff_text, &changed_files);
 
-Project: {project_description}
-Change: {change_description}
-{conventions_section}{files_section}{blast_section}{history_section}
-How to review:
-1. Read the diff carefully. You have file-read tools — use them when a finding's validity depends on context the diff doesn't show (callers, tests, related files, imports, prior implementation).
-2. Verify each potential issue against the actual code before reporting. If you cannot cite specific lines that prove the problem, drop the finding — or, if the signal is real but unverified, lower confidence honestly instead of hiding the uncertainty.
-3. Use the blast-radius data above to weight severity: a behavior change to a symbol with 6+ callers should be at least medium severity unless the change is provably backward-compatible.
-4. Skip nitpicks (formatting, naming preference, missing comments) unless they will cause real bugs or break a workflow.
-5. Repo conventions above are authoritative. Drop findings that contradict them.
-6. History signals (if present) explain prior commits and agent work on the touched files — use them to understand *intent* and avoid re-flagging deliberate past decisions. Only call out if the new diff re-opens an old problem.
-
-Output format:
-
-Think through the review first (you may use tools and write reasoning notes). Then output **exactly one** ```json fenced block as the very LAST thing in your response, matching this shape. Do not emit any other ```json fenced blocks anywhere — examples in your reasoning should be unfenced or use a different language tag.
-
-JSON shape (literal text, not a fenced example):
-{{"findings":[{{"severity":"critical|high|medium|low","title":"...","summary":"... — include the specific lines that prove the problem","suggestion":"...","filePath":"...","line":42,"confidence":0.9}}],"score":75,"summary":"Overall assessment","talk":{{"files_read":["src/file.ts"],"files_modified":[],"actions_summary":"What you reviewed and found","unfinished_work":null,"key_decisions":"Important observations about the code","recommended_next_steps":"What should happen next"}}}}
-
-Rules:
-- severity must be one of: critical, high, medium, low
-- confidence is 0.0-1.0 — be honest; downgrade rather than overclaim
-- line is optional (null if unknown); filePath relative to repo root
-- score is 0-100 (100 = perfect)
-- Each finding's `summary` must reference the specific line(s) or symbol(s) that prove the problem
-- The "talk" object captures context for the next review/fix run — populate `files_read` with anything you actually opened
-
-Diff:
-{diff_text}"#
-    );
-
-    // Inject previous talk context if available
-    let prompt = {{
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let p = maybe_prepend_talk_context(&conn, &repo_path, &base_prompt);
-        drop(conn);
-        p
-    }};
-
-    // 4. Spawn the CLI agent
+    // 4. Spawn the CLI agent for the selected tier/specialists.
     let cli_cmd = match agent.as_str() {
         "gemini" => "gemini",
         _ => "claude",
     };
     let cli_path = resolve_cli_path(cli_cmd);
 
-    let cli_output = StdCommand::new(&cli_path)
-        .args(["-p", &prompt])
-        .current_dir(&repo_path)
-        .output()
-        .map_err(|e| format!("Failed to spawn {cli_cmd} (resolved to {cli_path}): {e}"))?;
+    let mut specialist_outputs: Vec<Value> = Vec::new();
+    let mut raw_outputs: Vec<String> = Vec::new();
+    let mut prompts_used: Vec<String> = Vec::new();
 
-    if !cli_output.status.success() {
-        let stderr = String::from_utf8_lossy(&cli_output.stderr);
-        return Err(format!("{cli_cmd} failed: {stderr}"));
+    for specialist in &plan.specialists {
+        let specialist_block = build_specialist_block(specialist, &plan);
+        let base_prompt = build_review_prompt(
+            &project_description,
+            &change_description,
+            &conventions_section,
+            &files_section,
+            &blast_section,
+            &history_section,
+            &specialist_block,
+            &diff_text,
+        );
+
+        let prompt = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            let p = maybe_prepend_talk_context(&conn, &repo_path, &base_prompt);
+            drop(conn);
+            p
+        };
+
+        let (mut parsed, raw_output) = run_agent_json(&cli_path, cli_cmd, &repo_path, &prompt)?;
+        if let Some(obj) = parsed.as_object_mut() {
+            obj.insert(
+                "specialist".to_string(),
+                json!({
+                    "id": specialist.id,
+                    "name": specialist.name,
+                    "focus": specialist.focus,
+                }),
+            );
+        }
+        specialist_outputs.push(parsed);
+        raw_outputs.push(raw_output);
+        prompts_used.push(prompt);
     }
 
-    let raw_output = String::from_utf8_lossy(&cli_output.stdout).to_string();
+    let mut coordinator_failed: Option<String> = None;
+    let parsed = if plan.uses_coordinator {
+        let coordinator_prompt = build_coordinator_prompt(
+            &project_description,
+            &change_description,
+            &plan,
+            &specialist_outputs,
+        );
+        prompts_used.push(coordinator_prompt.clone());
 
-    // 5. Extract JSON from the output (may be wrapped in markdown code blocks)
-    let json_str = extract_json_from_output(&raw_output)
-        .ok_or_else(|| format!("Could not find JSON in {cli_cmd} output"))?;
+        match run_agent_json(&cli_path, cli_cmd, &repo_path, &coordinator_prompt) {
+            Ok((mut parsed, raw_output)) => {
+                if let Some(obj) = parsed.as_object_mut() {
+                    obj.insert("coordinator".to_string(), json!({"status": "completed"}));
+                }
+                raw_outputs.push(raw_output);
+                parsed
+            }
+            Err(err) => {
+                coordinator_failed = Some(err.clone());
+                let merged_findings = dedupe_findings(
+                    specialist_outputs
+                        .iter()
+                        .flat_map(findings_from)
+                        .collect::<Vec<_>>(),
+                );
+                json!({
+                    "findings": merged_findings,
+                    "score": score_from_findings(&json!({}), &merged_findings),
+                    "summary": format!(
+                        "Risk-tiered review ({}) completed with deterministic merge because coordinator failed: {}",
+                        plan.tier,
+                        err
+                    ),
+                    "talk": {
+                        "files_read": [],
+                        "files_modified": [],
+                        "actions_summary": "Merged specialist review outputs after coordinator failure",
+                        "unfinished_work": "Review the merged findings manually; coordinator pass failed.",
+                        "key_decisions": format!("Tier {} used {} specialist pass(es).", plan.tier, plan.specialists.len()),
+                        "recommended_next_steps": "Re-run review if coordinator rationale is needed."
+                    },
+                    "coordinator": {"status": "failed", "error": err}
+                })
+            }
+        }
+    } else {
+        let merged_findings = dedupe_findings(
+            specialist_outputs
+                .iter()
+                .flat_map(findings_from)
+                .collect::<Vec<_>>(),
+        );
+        let summaries = specialist_outputs
+            .iter()
+            .filter_map(|output| output.get("summary").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        json!({
+            "findings": merged_findings,
+            "score": score_from_findings(&json!({}), &merged_findings),
+            "summary": if summaries.is_empty() {
+                format!("Risk-tiered review ({}) completed.", plan.tier)
+            } else {
+                format!("Risk-tiered review ({}) completed.\n\n{}", plan.tier, summaries)
+            },
+            "talk": {
+                "files_read": [],
+                "files_modified": [],
+                "actions_summary": format!("Ran {} review pass(es) for {} tier.", plan.specialists.len(), plan.tier),
+                "unfinished_work": null,
+                "key_decisions": format!("Review mode {} used deterministic dedupe.", plan.mode),
+                "recommended_next_steps": "Fix selected findings, then re-run review or attach runtime evidence."
+            }
+        })
+    };
 
-    let parsed: Value =
-        serde_json::from_str(&json_str).map_err(|e| format!("Failed to parse JSON: {e}"))?;
-
-    // 6. Extract findings
-    let findings_val = parsed
-        .get("findings")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    // 5. Extract findings and score from the final/merged review output.
+    let findings_val = dedupe_findings(findings_from(&parsed));
 
     let summary = parsed
         .get("summary")
@@ -488,27 +949,24 @@ Diff:
         .unwrap_or("Review completed")
         .to_string();
 
-    // 7. Compute score from findings if AI didn't return one
-    let score: f64 = parsed
-        .get("score")
-        .and_then(|v| v.as_f64())
-        .unwrap_or_else(|| {
-            let mut s: f64 = 100.0;
-            for f in &findings_val {
-                let sev = f
-                    .get("severity")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("low");
-                s += match sev {
-                    "critical" => -20.0,
-                    "high" => -10.0,
-                    "medium" => -5.0,
-                    "low" => -2.0,
-                    _ => -1.0,
-                };
-            }
-            s.max(0.0)
-        });
+    let score = score_from_findings(&parsed, &findings_val);
+
+    let summary_markdown = format!(
+        "{}\n\n---\nReview mode: {} ({}) · changed lines: {} · specialist passes: {}{}",
+        summary,
+        plan.mode,
+        plan.tier,
+        plan.changed_lines,
+        plan.specialists
+            .iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>()
+            .join(", "),
+        coordinator_failed
+            .as_ref()
+            .map(|err| format!(" · coordinator fallback: {err}"))
+            .unwrap_or_default()
+    );
 
     // 8. Persist the review
     let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -525,8 +983,7 @@ Diff:
         status: Some("completed".to_string()),
     };
 
-    let review_id =
-        queries::create_local_review(&conn, &input).map_err(|e| e.to_string())?;
+    let review_id = queries::create_local_review(&conn, &input).map_err(|e| e.to_string())?;
 
     for f in &findings_val {
         let severity = f
@@ -548,10 +1005,7 @@ Diff:
             .get("suggestion")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let file_path = f
-            .get("filePath")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let file_path = f.get("filePath").and_then(|v| v.as_str()).map(String::from);
         let line = f.get("line").and_then(|v| v.as_i64());
         let confidence = f.get("confidence").and_then(|v| v.as_f64());
 
@@ -581,7 +1035,7 @@ Diff:
             score_composite: Some(score),
             findings_count: Some(findings_val.len() as i64),
             review_action: None,
-            summary_markdown: Some(summary.clone()),
+            summary_markdown: Some(summary_markdown.clone()),
             error_message: None,
             completed_at: Some(chrono::Utc::now().to_rfc3339()),
         },
@@ -595,12 +1049,25 @@ Diff:
             agent_id: None,
             event_type: Some("cli_review_completed".to_string()),
             summary: Some(format!(
-                "CLI review ({agent}) for {}: score={:.0}, {} findings",
+                "CLI review ({agent}, {}:{}) for {}: score={:.0}, {} findings",
+                plan.mode,
+                plan.tier,
                 source_label,
                 score,
                 findings_val.len()
             )),
-            metadata: Some(json!({"review_id": review_id}).to_string()),
+            metadata: Some(
+                json!({
+                    "review_id": review_id,
+                    "review_mode": plan.mode,
+                    "risk_tier": plan.tier,
+                    "changed_lines": plan.changed_lines,
+                    "specialists": plan.specialists.iter().map(|s| s.id).collect::<Vec<_>>(),
+                    "sensitive_paths": plan.sensitive_paths.clone(),
+                    "coordinator_failed": coordinator_failed,
+                })
+                .to_string(),
+            ),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -608,10 +1075,12 @@ Diff:
     let duration_ms = start_time.elapsed().as_millis() as u64;
 
     // 10. Capture talk for handover
+    let talk_prompt = prompts_used.join("\n\n--- CODEVETTER REVIEW PASS ---\n\n");
+    let raw_output = raw_outputs.join("\n\n--- CODEVETTER REVIEW OUTPUT ---\n\n");
     let talk_input = talk::build_talk_from_review(
         &agent,
         &repo_path,
-        &base_prompt,
+        &talk_prompt,
         &raw_output,
         &parsed,
         Some(&review_id),
@@ -633,6 +1102,12 @@ Diff:
         "diff_range": diff_range,
         "findings_count": findings_val.len(),
         "talk_id": talk_id,
+        "review_mode": plan.mode,
+        "risk_tier": plan.tier,
+        "changed_lines": plan.changed_lines,
+        "specialists": plan.specialists.iter().map(|s| s.id).collect::<Vec<_>>(),
+        "sensitive_paths": plan.sensitive_paths.clone(),
+        "coordinator_used": plan.uses_coordinator,
     }))
 }
 
@@ -719,11 +1194,17 @@ pub async fn fix_findings(
     // Build fix prompt
     let mut issues = String::new();
     for (i, f) in findings.iter().enumerate() {
-        let severity = f.get("severity").and_then(|v| v.as_str()).unwrap_or("medium");
+        let severity = f
+            .get("severity")
+            .and_then(|v| v.as_str())
+            .unwrap_or("medium");
         let title = f.get("title").and_then(|v| v.as_str()).unwrap_or("Issue");
         let summary = f.get("summary").and_then(|v| v.as_str()).unwrap_or("");
         let suggestion = f.get("suggestion").and_then(|v| v.as_str()).unwrap_or("");
-        let file_path = f.get("filePath").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let file_path = f
+            .get("filePath")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         let line = f.get("line").and_then(|v| v.as_i64());
 
         issues.push_str(&format!("\n{}. [{severity}] {title}\n", i + 1));
@@ -769,7 +1250,9 @@ pub async fn fix_findings(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Failed to spawn {cli_cmd} (resolved to {cli_path_clone}): {e}"))?;
+            .map_err(|e| {
+                format!("Failed to spawn {cli_cmd} (resolved to {cli_path_clone}): {e}")
+            })?;
 
         let mut stdout_text = String::new();
         if let Some(stdout_pipe) = child.stdout.take() {
@@ -787,16 +1270,21 @@ pub async fn fix_findings(
             }
         }
 
-        let status = child.wait().map_err(|e| format!("Process wait failed: {e}"))?;
+        let status = child
+            .wait()
+            .map_err(|e| format!("Process wait failed: {e}"))?;
         let elapsed = start_time.elapsed().as_millis() as u64;
 
         if !status.success() {
-            let stderr_text = child.stderr.map(|mut s| {
-                let mut buf = String::new();
-                use std::io::Read;
-                let _ = s.read_to_string(&mut buf);
-                buf
-            }).unwrap_or_default();
+            let stderr_text = child
+                .stderr
+                .map(|mut s| {
+                    let mut buf = String::new();
+                    use std::io::Read;
+                    let _ = s.read_to_string(&mut buf);
+                    buf
+                })
+                .unwrap_or_default();
             return Err(format!("{cli_cmd} fix failed: {stderr_text}"));
         }
 
@@ -925,7 +1413,13 @@ pub async fn merge_fix(
 
     // 2. Merge the branch into the main repo
     let merge_output = StdCommand::new("git")
-        .args(["merge", &worktree_branch, "--no-ff", "-m", "fix: merge code review fixes"])
+        .args([
+            "merge",
+            &worktree_branch,
+            "--no-ff",
+            "-m",
+            "fix: merge code review fixes",
+        ])
         .current_dir(&repo_path)
         .output()
         .map_err(|e| format!("Failed to merge: {e}"))?;
@@ -989,10 +1483,7 @@ pub async fn discard_fix(
 
 /// Revert specific files to their git HEAD state.
 #[tauri::command]
-pub async fn revert_files(
-    repo_path: String,
-    files: Vec<String>,
-) -> Result<Value, String> {
+pub async fn revert_files(repo_path: String, files: Vec<String>) -> Result<Value, String> {
     let mut reverted = Vec::new();
     let mut failed = Vec::new();
 
@@ -1014,6 +1505,56 @@ pub async fn revert_files(
     Ok(json!({
         "reverted": reverted,
         "failed": failed,
+    }))
+}
+
+/// Reverse-apply one unified diff hunk from the fix worktree.
+#[tauri::command]
+pub async fn revert_diff_hunk(
+    repo_path: String,
+    file_path: String,
+    hunk: String,
+) -> Result<Value, String> {
+    let path = Path::new(&file_path);
+    if path.is_absolute() || file_path.split('/').any(|part| part == "..") {
+        return Err("Refusing to revert a hunk outside the repository".to_string());
+    }
+    if !hunk.lines().any(|line| line.starts_with("@@")) {
+        return Err("Invalid diff hunk: missing hunk header".to_string());
+    }
+
+    let patch = format!(
+        "diff --git a/{file_path} b/{file_path}\n--- a/{file_path}\n+++ b/{file_path}\n{}\n",
+        hunk.trim_end()
+    );
+
+    let mut child = StdCommand::new("git")
+        .args(["apply", "-R", "--recount", "-"])
+        .current_dir(&repo_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to run git apply: {e}"))?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(patch.as_bytes())
+            .map_err(|e| format!("Failed to write hunk patch: {e}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to wait for git apply: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git apply -R failed: {stderr}"));
+    }
+
+    Ok(json!({
+        "reverted": true,
+        "file": file_path,
     }))
 }
 
@@ -1092,6 +1633,38 @@ fn extract_json_from_output(output: &str) -> Option<String> {
         }
     }
     last_raw
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_line_count_ignores_diff_headers() {
+        let diff = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,2 @@\n-old\n+new\n+another\n";
+        assert_eq!(changed_line_count(diff), 3);
+    }
+
+    #[test]
+    fn review_plan_keeps_trivial_diff_single_pass() {
+        let diff = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
+        let plan = build_review_plan(diff, &["src/a.ts".to_string()]);
+        assert_eq!(plan.tier, "trivial");
+        assert_eq!(plan.mode, "single-pass");
+        assert!(!plan.uses_coordinator);
+        assert_eq!(plan.specialists.len(), 1);
+    }
+
+    #[test]
+    fn review_plan_forces_full_on_sensitive_path() {
+        let diff = "diff --git a/src/auth.ts b/src/auth.ts\n--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -1 +1 @@\n-old\n+new\n";
+        let plan = build_review_plan(diff, &["src/auth.ts".to_string()]);
+        assert_eq!(plan.tier, "full-sensitive");
+        assert_eq!(plan.mode, "specialist-full");
+        assert!(plan.uses_coordinator);
+        assert_eq!(plan.specialists.len(), 3);
+        assert_eq!(plan.sensitive_paths, vec!["src/auth.ts".to_string()]);
+    }
 }
 
 /// List reviews with pagination and optional repo filter.

@@ -282,6 +282,12 @@ export interface CliReviewResult {
   duration_ms: number;
   diff_range: string;
   findings_count: number;
+  review_mode?: string;
+  risk_tier?: string;
+  changed_lines?: number;
+  specialists?: string[];
+  sensitive_paths?: string[];
+  coordinator_used?: boolean;
 }
 
 // History context signals for review intent (recent commits on touched files,
@@ -297,6 +303,14 @@ export interface RepoHistoryContext {
     date: string;
     author?: string;
   }>;
+  prior_decisions?: Array<{
+    file: string;
+    source: string;
+    text: string;
+    line?: number | null;
+    sha?: string | null;
+    date?: string | null;
+  }>;
   prior_agent_activity: Array<{
     id: string;
     agent: string;
@@ -304,12 +318,59 @@ export interface RepoHistoryContext {
     summary: string;
     files?: string[];
   }>;
+  command_signals?: Array<{
+    agent: string;
+    date: string;
+    command: string;
+    source: string;
+    source_path?: string | null;
+    source_line?: number | null;
+    event_id?: string;
+    talk_id?: string;
+    session_id?: string | null;
+    review_id?: string | null;
+    exit_code?: number | null;
+    status?: "passed" | "failed" | "stale" | "unknown";
+    status_reason?: string;
+    artifacts?: string[];
+    context_excerpt?: string[];
+  }>;
+  agent_claims?: Array<{
+    agent: string;
+    date: string;
+    claim: string;
+    source: string;
+    source_line?: number | null;
+    event_id?: string;
+    talk_id?: string;
+    session_id?: string | null;
+    review_id?: string | null;
+  }>;
   recurring_failures: Array<{
     file: string;
     count: number;
     examples?: string[];
   }>;
   prompt_snippet?: string;
+}
+
+export interface RawSessionContextItem {
+  line: number;
+  role: string;
+  kind: "command" | "result" | "message" | "raw";
+  text: string;
+  status?: "passed" | "failed" | "stale" | "unknown";
+  artifacts?: string[];
+  highlight: boolean;
+}
+
+export interface RawSessionContextResult {
+  file_path: string;
+  target_line: number;
+  start_line: number;
+  end_line: number;
+  raw_lines_seen: number;
+  items: RawSessionContextItem[];
 }
 
 export interface FixChangedFile {
@@ -332,6 +393,11 @@ export interface FixFindingsResult {
 export interface RevertFilesResult {
   reverted: string[];
   failed: { file: string; error: string }[];
+}
+
+export interface RevertDiffHunkResult {
+  reverted: boolean;
+  file: string;
 }
 
 export async function runCliReview(
@@ -374,6 +440,18 @@ export async function revertFiles(
   return safeInvoke("revert_files", {
     repoPath,
     files,
+  });
+}
+
+export async function revertDiffHunk(
+  repoPath: string,
+  filePath: string,
+  hunk: string,
+): Promise<RevertDiffHunkResult> {
+  return safeInvoke("revert_diff_hunk", {
+    repoPath,
+    filePath,
+    hunk,
   });
 }
 
@@ -422,6 +500,20 @@ export async function getRepoHistoryContext(
   return safeInvoke("get_repo_history_context", {
     repoPath,
     diffRange,
+  });
+}
+
+export async function readRawSessionContext(
+  filePath: string,
+  line: number,
+  contextBefore?: number,
+  contextAfter?: number,
+): Promise<RawSessionContextResult> {
+  return safeInvoke("read_raw_session_context", {
+    filePath,
+    line,
+    contextBefore: contextBefore ?? 8,
+    contextAfter: contextAfter ?? 12,
   });
 }
 
@@ -1274,17 +1366,52 @@ export interface SyntheticQaRunResult {
   pass: boolean;
   notes: string;
   screenshot_path: string | null;
+  artifacts?: string[];
   duration_ms: number;
   trace: SyntheticQaTrace;
   error: string | null;
+  runner_type?: string | null;
+}
+
+export interface PlaywrightSpecCandidate {
+  path: string;
+  reason: string;
+}
+
+export async function discoverPlaywrightSpecs(
+  repoPath: string,
+): Promise<{ specs: PlaywrightSpecCandidate[] }> {
+  return safeInvoke("discover_playwright_specs", { repoPath });
 }
 
 export async function runSyntheticQa(
   baseUrl: string,
   loopId?: string,
+  options?: {
+    runnerType?: "playwright_builtin" | "external_skill" | "repo_playwright";
+    goal?: string;
+    externalCommand?: string;
+    authMode?: "none" | "storage_state";
+    storageStatePath?: string;
+    targetRoute?: string;
+    repoPath?: string;
+    specPath?: string;
+    allowRemoteTarget?: boolean;
+    repoTraceMode?: "off" | "on" | "retain-on-failure";
+  },
 ): Promise<SyntheticQaRunResult> {
   return safeInvoke("run_synthetic_qa", {
     baseUrl,
     loopId: loopId ?? null,
+    runnerType: options?.runnerType ?? null,
+    goal: options?.goal ?? null,
+    externalCommand: options?.externalCommand ?? null,
+    authMode: options?.authMode ?? null,
+    storageStatePath: options?.storageStatePath ?? null,
+    targetRoute: options?.targetRoute ?? null,
+    repoPath: options?.repoPath ?? null,
+    specPath: options?.specPath ?? null,
+    allowRemoteTarget: options?.allowRemoteTarget ?? null,
+    repoTraceMode: options?.repoTraceMode ?? null,
   });
 }

@@ -6,6 +6,10 @@
     "apps/*"
   ],
   "scripts": {
+    "bench:catch-rate": "node scripts/run-catch-rate-benchmark.mjs",
+    "bench:curation": "node scripts/report-benchmark-curation.mjs",
+    "bench:new-case": "node scripts/create-benchmark-case.mjs",
+    "test:benchmark": "node --test scripts/run-catch-rate-benchmark.test.mjs",
     "prepare": "husky || true"
   },
   "license": "ISC",

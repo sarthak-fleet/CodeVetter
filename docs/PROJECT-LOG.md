@@ -1,6 +1,6 @@
 # CodeVetter Project Log
 
-**Last updated**: 2026-04-24
+**Last updated**: 2026-06-05
 **Status**: Active development (desktop app)
 
 ---
@@ -161,6 +161,28 @@ The primary workflow surface. Commit history: `3858e95` through `29c31c4`.
 
 ## 5. What's Planned (next priorities)
 
+### Risk-Tiered Specialist Review
+
+Status: v1 implemented in the desktop CLI review path on 2026-06-05.
+
+Borrow the useful part of modern AI review systems without turning CodeVetter into a generic hosted PR bot: run different review depth based on diff risk. Trivial diffs should stay a single quick pass; medium diffs should run a small set of specialist checks; large or security-sensitive diffs should run product-safety, security-boundary, and agent-handoff passes plus a coordinator that deduplicates findings and assigns the final score.
+
+Why this is good: CodeVetter already has standards packs that map cleanly to specialist reviewers, and the product wedge is finding real agent-code failures with evidence, not producing more comments. Risk tiers keep cost and latency bounded while making bigger agent changes harder to rubber-stamp.
+
+Acceptance shape:
+- Tier by changed-line count and sensitive paths; force full review for auth, secrets, migrations, shell/network execution, and Tauri IPC boundaries.
+- Reuse existing standards packs as the first specialist definitions instead of inventing a new rubric system.
+- Return a single finding list with duplicate findings merged, severity normalized, and the coordinator rationale stored in the review record.
+- Keep a cheap default path for small diffs so the desktop review flow remains interactive.
+- Measure against a small set of real agent-generated diffs before making full multi-pass review the default.
+
+Implemented shape:
+- `trivial`: one general review pass.
+- `lite`: product-safety + agent-handoff passes, deterministically deduped.
+- `full` / `full-sensitive`: product-safety + security-boundary + agent-handoff passes, followed by a coordinator pass when available.
+- Review result metadata now includes `review_mode`, `risk_tier`, `changed_lines`, `specialists`, `sensitive_paths`, and coordinator usage.
+- Focused tests cover tiering and changed-line counting.
+
 ### CLI Auto-Review Hook
 
 Two approaches under consideration:
@@ -175,7 +197,9 @@ Move beyond diff-level review to understanding what each commit does semanticall
 
 ### Hunk-Level Revert
 
-Currently revert is file-level only. Users want to revert individual hunks within a file when a fix partially succeeded. Requires building a hunk parser on top of the existing git diff output.
+Status: v1 implemented in the Review fix diff on 2026-06-05.
+
+Fix results now support reverting a full changed file or an individual diff hunk. Hunk revert uses Git's patch machinery (`git apply -R --recount`) from the Tauri backend, then refreshes the worktree diff in the UI so partially successful fixes can be kept without accepting the whole agent patch.
 
 ### UI Polish
 
@@ -194,6 +218,46 @@ Surface past design intent to the LLM during review so it catches *intent regres
 Output: a "Prior decisions touching this change" block prepended to the review prompt, next to the existing blast-radius summary. Plugs into `apps/desktop/src-tauri/src/commands/review.rs:291` right after `compute_blast_radius`. Estimated 1 day of work for v1 (markers + git-log); ADR pickup and staleness tracking deferred to v2.
 
 Differentiator context: no existing review tool (CodeRabbit, Greptile, Claude Code `/review`, Copilot review) does this. Maps directly to the "review agent-generated code" niche because intent-regression is the dominant failure mode of agent PRs.
+
+Implemented v1:
+- Prior decisions are mined from inline markers and decision-shaped git subjects, then shown in review history context.
+- The Review screen now builds an intent timeline from goal, history signals, review metadata, synthetic QA runs, fix worktree state, and verification evidence.
+- Command/test-like snippets and agent-claim-like snippets are mined from stored agent talks and surfaced in the Review history panel plus intent timeline.
+- Command/test snippets now include conservative status inference (`passed`, `failed`, `stale`, `unknown`) from transcript line markers and agent exit-code fallback.
+- Command/test snippets also mine nearby artifact paths for common logs, screenshots, reports, traces, videos, and coverage outputs, then expose artifact counts in Review and the intent timeline.
+- Command/test snippets now include source/event anchors: talk ID, source field, source line for text-derived evidence, session/review IDs when present, and structured `output_structured.command_signals[]` support for exact event IDs/artifacts.
+- Indexed Claude/Codex JSONL sessions are replayed for recent repo-matching sessions, extracting anchored shell/tool command events from Codex function-call style records, Claude `Bash` tool-use records, OpenAI-style `tool_calls`, and Gemini-style `functionCall` / `functionResponse` records. Raw replay is bounded and only surfaces command/status/artifact metadata, not full transcript text.
+- Review history and intent timeline now show command source breakdowns, including raw-session command counts and structured `output_structured` command counts. Raw-session command rows carry the source JSONL path, include bounded normalized context excerpts from nearby transcript/result lines, can preview a wider normalized transcript window around the command event line, and can open the source transcript in the desktop app.
+- Compact review prompts now include prior command/test evidence with status, artifact counts, and the first bounded raw-session context excerpt when present, so the reviewer can account for stale, failed, or already-passing verification signals.
+- Review finding cards now show file-linked history summaries that count matching commits, prior decisions, recurring failures, commands, and agent claims; copied proof includes the same per-finding history context plus compact command evidence rows with status/source/event/artifact anchors. The proof markdown builder is now a pure helper covered by `npm run test:review-proof`.
+- Remaining gap: full multi-turn conversation reconstruction around a command event when the normalized command/result window is not enough.
+
+Synthetic QA v1 additions:
+- Named QA workflows can save route/goal target matrices.
+- Built-in and external runners receive `--route`, `--auth-mode`, and optional `--storage-state`.
+- Generic page-smoke loop supports arbitrary route targets without requiring CodeVetter-specific Review heading assertions.
+- `repo_playwright` runner executes a selected repository-relative Playwright spec and maps pass/fail plus log/report artifacts into the common SyntheticQaRunResult contract.
+- The Review QA panel can discover Playwright-looking specs by scanning the selected repo for e2e/playwright paths or `@playwright/test` imports.
+- Repo Playwright specs receive `CODEVETTER_SYNTHETIC_QA_*` environment variables for base URL, route, goal, auth mode, storage state, and artifact directory.
+- Repo Playwright runs expose a saved trace mode and execute with `--trace <mode>` plus `--output <run-artifact-dir>/repo-playwright-output`, so traces and repo-configured screenshots/videos land under the QA run.
+- Repo Playwright JSON reporter output is parsed so failing test titles and first error messages become structured QA evidence in `trace.console_errors`.
+- Repo Playwright report attachments are harvested so screenshots, traces, videos, and other file artifacts can be surfaced in QA notes and the primary evidence artifact path.
+- Synthetic QA results now include first-class `artifacts[]`, and Review displays/replays those paths instead of overloading only `screenshot_path`.
+- Repo Playwright runs now retain their saved JSON report and raw log as artifacts even when the spec does not emit screenshots/videos, and Review labels artifact rows by type with local open actions in the desktop app. Text-like artifacts (logs, JSON reports, HTML reports, coverage) can be previewed inline with a bounded 60-line read; binary screenshots, videos, and traces stay open-only.
+- Synthetic QA blocks non-loopback targets by default; the Review panel exposes an explicit remote-target opt-in that is saved in QA presets/workflows.
+
+Catch-rate benchmark v1 additions:
+- `npm run bench:catch-rate` validates fixture shape before scoring.
+- Fixtures can now be one combined `cases[]` JSON file, one per-case JSON file, or a directory of sorted per-case JSON files.
+- `npm run bench:new-case` creates a per-case starter fixture for public PR curation.
+- `npm run bench:curation` reports curation readiness before scoring: public source metadata, raw diff artifact, named CodeVetter / CodeRabbit free-tier / Claude Code review output artifacts, ground-truth evidence, and match rationales.
+- Reviewer output now reports catch rate by severity, false-positive counts, missed issue IDs, and optional baseline deltas.
+- Reviewer output now includes precision and F1 so high catch rate cannot hide noisy review behavior; precision penalizes both false positives and duplicate matched findings.
+- `--json` / `--format=json` emits machine-readable summaries; `--format=markdown` emits a durable report; `--out=<path>` writes report artifacts to disk.
+- `--min-rate=<0..1>`, repeatable `--min-severity-rate=<severity>:<0..1>`, `--max-false-positives=<n>`, and `--max-redundant-matches=<n>` exit non-zero when a reviewer falls outside configured gates.
+- `--require-rationales` validates publishable fixtures by requiring ground-truth evidence text and match rationale on every matched finding.
+- `npm run test:benchmark` covers stable JSON metrics, rationale enforcement, TODO-placeholder rejection, per-case/directory fixture loading, curation readiness reporting, false-positive gates, redundant-match gates, and Markdown artifact output using temporary fixtures.
+- The sample fixture now covers UI regression, auth-boundary regression, prior-intent/history regression, a comparator baseline, and a deliberate false-positive case. New curated cases start with explicit `codevetter`, `coderabbit_free`, and `claude_code_review` output slots so comparator capture is not tracked as one vague baseline.
 
 ### Published Catch-Rate Benchmark
 

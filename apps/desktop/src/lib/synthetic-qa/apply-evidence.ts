@@ -22,7 +22,11 @@ export function syntheticQaToFindingEvidence(
   run: SyntheticQaRunResult,
 ): FindingEvidence {
   const status: VerificationStatus = run.pass ? "not_reproduced" : "reproduced";
-  const artifact = run.screenshot_path?.trim() ?? `synthetic-qa:${run.loop_id}`;
+  const artifacts = [
+    ...(run.artifacts ?? []),
+    ...(run.screenshot_path ? [run.screenshot_path] : []),
+  ].filter((path, index, arr) => path.trim() && arr.indexOf(path) === index);
+  const artifact = artifacts[0]?.trim() ?? `synthetic-qa:${run.loop_id}`;
 
   const noteLines = [
     `Synthetic QA · ${run.loop_id}`,
@@ -34,6 +38,9 @@ export function syntheticQaToFindingEvidence(
   ];
   if (run.trace.console_errors.length > 0) {
     noteLines.push("", "Console errors:", ...run.trace.console_errors.map((e) => `  - ${e}`));
+  }
+  if (artifacts.length > 0) {
+    noteLines.push("", "Artifacts:", ...artifacts.map((path) => `  - ${path}`));
   }
   if (run.error) {
     noteLines.push("", `Runner: ${run.error}`);

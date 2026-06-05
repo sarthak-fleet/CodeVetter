@@ -14,6 +14,7 @@ const baseRun: SyntheticQaRunResult = {
   pass: false,
   notes: "Console error: TypeError",
   screenshot_path: "/tmp/synthetic-qa/1/failure.png",
+  artifacts: [],
   duration_ms: 1200,
   trace: {
     final_url: "http://localhost:1420/review",
@@ -37,6 +38,20 @@ describe("syntheticQaToFindingEvidence", () => {
     const ev = syntheticQaToFindingEvidence({ ...baseRun, pass: true, notes: "ok" });
     assert.equal(ev.status, "not_reproduced");
     assert.match(ev.notes, /PASS/);
+  });
+
+  it("prefers first explicit artifact and lists all artifacts", () => {
+    const ev = syntheticQaToFindingEvidence({
+      ...baseRun,
+      artifacts: [
+        "/tmp/synthetic-qa/1/trace.zip",
+        "/tmp/synthetic-qa/1/video.webm",
+      ],
+    });
+    assert.equal(ev.artifact, "/tmp/synthetic-qa/1/trace.zip");
+    assert.match(ev.notes, /trace\.zip/);
+    assert.match(ev.notes, /video\.webm/);
+    assert.match(ev.notes, /failure\.png/);
   });
 });
 

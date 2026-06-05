@@ -90,6 +90,7 @@ export function runFixture(fixture: SyntheticQaFixture): SyntheticQaRunResult {
     pass,
     notes: notesLines.join("\n"),
     screenshot_path: null,
+    artifacts: [],
     duration_ms: Date.now() - started,
     trace: {
       final_url: fixture.route,

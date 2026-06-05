@@ -26,9 +26,12 @@ export interface SyntheticQaRunResult {
   pass: boolean;
   notes: string;
   screenshot_path: string | null;
+  artifacts?: string[];
   duration_ms: number;
   trace: SyntheticQaTrace;
   error: string | null;
+  /** Runner used by the desktop command: built-in Playwright, external skill, etc. */
+  runner_type?: string | null;
   /** Present when the run came from a deterministic fixture replay. */
   steps?: SyntheticQaStepResult[];
   observations?: SyntheticQaObservationResult[];

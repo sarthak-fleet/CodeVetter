@@ -164,6 +164,7 @@ fn main() {
             commands::review::merge_fix,
             commands::review::discard_fix,
             commands::review::revert_files,
+            commands::review::revert_diff_hunk,
             // Blast radius (graph-aware PR analysis)
             commands::blast_radius::analyze_blast_radius,
             // Sessions (used by Home for index stats)
@@ -182,6 +183,7 @@ fn main() {
             commands::git::sync_github_token,
             commands::git::get_git_changed_files,
             commands::git::get_repo_history_context,
+            commands::git::read_raw_session_context,
             // GitHub PR & CI
             commands::github_ops::create_pull_request,
             commands::github_ops::list_pull_requests_for_repo,
@@ -224,6 +226,7 @@ fn main() {
             commands::unpack::export_repo_unpack_report,
             // Synthetic user QA
             commands::synthetic_qa::run_synthetic_qa,
+            commands::synthetic_qa::discover_playwright_specs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

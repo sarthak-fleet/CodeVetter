@@ -23,9 +23,10 @@ import {
   Square,
   Trash2,
   Undo2,
+  X,
   Zap,
 } from "lucide-react";
-import { type ReactNode,useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 
 import BlastRadiusPanel from "@/components/blast-radius-panel";
@@ -34,6 +35,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { trackCoreAction } from "@/lib/analytics";
+import { buildReviewIntentReport } from "@/lib/intent-debugger/report";
+import {
+  buildRevalidationChecklist,
+  buildReviewerProofMarkdown,
+  formatHistoryCommandEvidence,
+  type HistoryFindingSummary,
+} from "@/lib/review-proof";
 import {
   syntheticQaFailureFinding,
   syntheticQaToFindingEvidence,
@@ -43,11 +51,25 @@ import {
   SYNTHETIC_QA_LOOPS,
 } from "@/lib/synthetic-qa/loops";
 import type { SyntheticQaRunResult } from "@/lib/synthetic-qa/types";
-import type { BlastRadiusReport,CliReviewFinding, CliReviewResult, FileLineData,FixChangedFile, FixFindingsResult , LocalReviewRow, PullRequest, RepoHistoryContext } from "@/lib/tauri-ipc";
+import type {
+  BlastRadiusReport,
+  CliReviewFinding,
+  CliReviewResult,
+  FileLineData,
+  FixChangedFile,
+  FixFindingsResult,
+  LocalReviewRow,
+  PlaywrightSpecCandidate,
+  PullRequest,
+  RawSessionContextItem,
+  RepoHistoryContext,
+} from "@/lib/tauri-ipc";
 import {
   analyzeBlastRadius,
   discardFix,
+  discoverPlaywrightSpecs,
   fixFindings,
+  getLocalDiff,
   getPreference,
   getRepoHistoryContext,
   getReview,
@@ -56,8 +78,12 @@ import {
   listPullRequests,
   listReviews,
   mergeFix,
+  openInApp,
   pickDirectory,
   readFileAroundLine,
+  readFilePreview,
+  readRawSessionContext,
+  revertDiffHunk,
   revertFiles,
   runCliReview,
   runSyntheticQa,
@@ -110,6 +136,37 @@ function severityIcon(s: string) {
     default:
       return <CheckCircle size={14} className="text-slate-400" />;
   }
+}
+
+function qaArtifactLabel(path: string): string {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".webp")) {
+    return "screenshot";
+  }
+  if (lower.endsWith(".zip") || lower.includes("trace")) {
+    return "trace";
+  }
+  if (lower.endsWith(".webm") || lower.endsWith(".mp4")) {
+    return "video";
+  }
+  if (lower.endsWith(".json")) {
+    return lower.includes("playwright") ? "json report" : "json";
+  }
+  if (lower.endsWith(".log") || lower.endsWith(".txt")) {
+    return "log";
+  }
+  if (lower.endsWith(".html") || lower.includes("playwright-report/")) {
+    return "html report";
+  }
+  if (lower.includes("coverage/")) {
+    return "coverage";
+  }
+  return "artifact";
+}
+
+function canPreviewQaArtifact(path: string): boolean {
+  const label = qaArtifactLabel(path);
+  return label === "log" || label === "json" || label === "json report" || label === "html report" || label === "coverage";
 }
 
 function formatRelativeTime(dateStr: string | null): string {
@@ -178,6 +235,9 @@ interface DiffFile {
 
 type EvidenceLevel = "static" | "test" | "browser" | "runtime";
 type VerificationStatus = "not_checked" | "reproduced" | "fixed" | "not_reproduced";
+type QaRunnerType = "playwright_builtin" | "external_skill" | "repo_playwright";
+type QaAuthMode = "none" | "storage_state";
+type QaRepoTraceMode = "off" | "retain-on-failure" | "on";
 
 interface FindingEvidence {
   level: EvidenceLevel;
@@ -197,73 +257,63 @@ const defaultFindingEvidence: FindingEvidence = {
   revalidation: {},
 };
 
-interface RevalidationItem {
-  id: string;
-  label: string;
+interface QaPreset {
+  baseUrl: string;
+  loopId: string;
+  runnerType: QaRunnerType;
+  goal: string;
+  externalCommand: string;
+  repoSpecPath: string;
+  authMode: QaAuthMode;
+  storageStatePath: string;
+  targetRoute: string;
+  allowRemoteTarget: boolean;
+  repoTraceMode: QaRepoTraceMode;
 }
 
-// Derive the revalidation checklist purely from existing evidence fields so the
-// list is always coherent with what the user has already recorded. Returns the
-// stable id and a one-liner; the UI checkbox state is stored separately.
-function buildRevalidationChecklist(
-  finding: CliReviewFinding,
-  evidence: FindingEvidence,
-): RevalidationItem[] {
-  const items: RevalidationItem[] = [];
-  const loc = finding.filePath
-    ? `${finding.filePath}${finding.line != null ? `:${finding.line}` : ""}`
-    : null;
+interface QaTargetPreset {
+  id: string;
+  name: string;
+  route: string;
+  goal: string;
+}
 
-  items.push({
-    id: "original-gone",
-    label: loc
-      ? `Confirm the original failure no longer reproduces at ${loc}.`
-      : "Confirm the originally-described failure no longer reproduces.",
-  });
+interface QaWorkflowPreset extends QaPreset {
+  id: string;
+  name: string;
+  targets?: QaTargetPreset[];
+  updatedAt: string;
+}
 
-  const artifact = evidence.artifact.trim();
-  if (artifact) {
-    items.push({
-      id: "rerun-artifact",
-      label: `Re-run the recorded artifact (${artifact}) and confirm it now passes.`,
-    });
-  } else if (evidence.level !== "static") {
-    items.push({
-      id: "capture-artifact",
-      label: "Capture a fresh artifact (command output, screenshot, or trace) proving the fix.",
-    });
+interface QaRunHistoryEntry {
+  createdAt: string;
+  loopId: string;
+  runnerType: string;
+  baseUrl: string;
+  goal: string;
+  route?: string;
+  authMode?: QaAuthMode;
+  pass: boolean;
+  durationMs: number;
+  notes: string;
+  screenshotPath: string | null;
+  artifacts?: string[];
+  consoleErrors: number;
+}
+
+function isLoopbackQaBaseUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.hostname === "localhost" ||
+      url.hostname === "127.0.0.1" ||
+      url.hostname === "::1" ||
+      url.hostname.endsWith(".localhost") ||
+      url.hostname.startsWith("127.")
+    );
+  } catch {
+    return false;
   }
-
-  if (evidence.level === "static") {
-    items.push({
-      id: "add-regression-test",
-      label: "Add or extend a test covering this case — the original signal was static-only.",
-    });
-  } else if (evidence.level === "browser") {
-    items.push({
-      id: "rerun-browser-flow",
-      label: "Walk the browser flow end-to-end and verify no console/network regressions.",
-    });
-  } else if (evidence.level === "runtime") {
-    items.push({
-      id: "watch-runtime",
-      label: "Watch the relevant logs / runtime trace for one more cycle to confirm silence.",
-    });
-  }
-
-  if (evidence.notes.trim()) {
-    items.push({
-      id: "recheck-notes",
-      label: "Re-read the QA notes and tick off each documented pass criterion.",
-    });
-  }
-
-  items.push({
-    id: "scan-neighbors",
-    label: "Spot-check adjacent files in the same diff for the same pattern.",
-  });
-
-  return items;
 }
 
 const evidenceLevels: Array<{ value: EvidenceLevel; label: string }> = [
@@ -286,6 +336,12 @@ function findingEvidenceKey(finding: CliReviewFinding, idx: number): string {
     finding.line ?? idx,
     finding.title,
   ].join("::");
+}
+
+function sameHistoryFile(historyFile: string, findingFile: string) {
+  const left = historyFile.toLowerCase();
+  const right = findingFile.toLowerCase();
+  return left === right || left.endsWith(`/${right}`) || right.endsWith(`/${left}`);
 }
 
 function parseDiffIntoFiles(diff: string): DiffFile[] {
@@ -506,9 +562,45 @@ export default function QuickReview() {
   // Synthetic user QA (browser loop → verification evidence)
   const [qaBaseUrl, setQaBaseUrl] = useState(CODEVETTER_REVIEW_SHELL.default_base_url);
   const [qaLoopId, setQaLoopId] = useState(CODEVETTER_REVIEW_SHELL.id);
+  const [qaRunnerType, setQaRunnerType] = useState<QaRunnerType>("playwright_builtin");
+  const [qaGoal, setQaGoal] = useState(CODEVETTER_REVIEW_SHELL.goal);
+  const [qaTargetRoute, setQaTargetRoute] = useState(CODEVETTER_REVIEW_SHELL.route);
+  const [qaTargetName, setQaTargetName] = useState(CODEVETTER_REVIEW_SHELL.label);
+  const [qaActiveTargetId, setQaActiveTargetId] = useState("");
+  const [qaTargets, setQaTargets] = useState<QaTargetPreset[]>([]);
+  const [qaExternalCommand, setQaExternalCommand] = useState("");
+  const [qaRepoSpecPath, setQaRepoSpecPath] = useState("");
+  const [qaRepoTraceMode, setQaRepoTraceMode] = useState<QaRepoTraceMode>("retain-on-failure");
+  const [qaSpecCandidates, setQaSpecCandidates] = useState<PlaywrightSpecCandidate[]>([]);
+  const [qaSpecLoading, setQaSpecLoading] = useState(false);
+  const [qaSpecError, setQaSpecError] = useState<string | null>(null);
+  const [qaAuthMode, setQaAuthMode] = useState<QaAuthMode>("none");
+  const [qaStorageStatePath, setQaStorageStatePath] = useState("");
+  const [qaAllowRemoteTarget, setQaAllowRemoteTarget] = useState(false);
+  const [qaWorkflowName, setQaWorkflowName] = useState(CODEVETTER_REVIEW_SHELL.label);
+  const [qaActiveWorkflowId, setQaActiveWorkflowId] = useState("");
+  const [qaWorkflows, setQaWorkflows] = useState<QaWorkflowPreset[]>([]);
+  const [qaPresetLoaded, setQaPresetLoaded] = useState(false);
+  const [qaRunHistory, setQaRunHistory] = useState<QaRunHistoryEntry[]>([]);
   const [qaRunning, setQaRunning] = useState(false);
   const [qaLastRun, setQaLastRun] = useState<SyntheticQaRunResult | null>(null);
   const [qaError, setQaError] = useState<string | null>(null);
+  const [qaArtifactPreview, setQaArtifactPreview] = useState<{
+    path: string;
+    content: string;
+    language: string;
+    totalLines: number;
+  } | null>(null);
+  const [qaArtifactPreviewLoading, setQaArtifactPreviewLoading] = useState(false);
+  const [commandSourcePreview, setCommandSourcePreview] = useState<{
+    key: string;
+    path: string;
+    line: number;
+    language: string;
+    lines?: FileLineData[];
+    items?: RawSessionContextItem[];
+  } | null>(null);
+  const [commandSourcePreviewLoading, setCommandSourcePreviewLoading] = useState<string | null>(null);
 
   // Diff range derived from selection
   const [diffRange, setDiffRange] = useState("");
@@ -828,6 +920,159 @@ export default function QuickReview() {
     );
   }, [uncheckedFindings]);
 
+  const historyFileSummaries = useMemo(() => {
+    if (!historyContext) return [];
+
+    const summaries = new Map<
+      string,
+      { commits: number; decisions: number; agents: number; recurring: number }
+    >();
+    const ensure = (file: string) => {
+      const existing = summaries.get(file);
+      if (existing) return existing;
+      const next = { commits: 0, decisions: 0, agents: 0, recurring: 0 };
+      summaries.set(file, next);
+      return next;
+    };
+
+    for (const file of historyContext.files_analyzed) ensure(file);
+    for (const commit of historyContext.recent_commits) ensure(commit.file).commits += 1;
+    for (const decision of historyContext.prior_decisions ?? []) {
+      ensure(decision.file).decisions += 1;
+    }
+    for (const recurring of historyContext.recurring_failures) {
+      ensure(recurring.file).recurring += recurring.count;
+    }
+    for (const activity of historyContext.prior_agent_activity) {
+      for (const file of activity.files ?? []) {
+        ensure(file).agents += 1;
+      }
+    }
+
+    return Array.from(summaries.entries())
+      .map(([file, counts]) => ({ file, ...counts }))
+      .filter((summary) =>
+        summary.commits + summary.decisions + summary.agents + summary.recurring > 0)
+      .sort((a, b) =>
+        (b.decisions + b.recurring + b.agents + b.commits) -
+        (a.decisions + a.recurring + a.agents + a.commits))
+      .slice(0, 5);
+  }, [historyContext]);
+
+  const historyFindingSummaries = useMemo(() => {
+    const map = new Map<number, HistoryFindingSummary>();
+    if (!historyContext) return map;
+
+    sortedFindings.forEach((finding, findingIdx) => {
+      const file = finding.filePath;
+      if (!file) return;
+
+      const commits = historyContext.recent_commits.filter((commit) =>
+        sameHistoryFile(commit.file, file));
+      const decisions = (historyContext.prior_decisions ?? []).filter((decision) =>
+        sameHistoryFile(decision.file, file));
+      const recurring = historyContext.recurring_failures.filter((failure) =>
+        sameHistoryFile(failure.file, file));
+      const commands = historyContext.command_signals ?? [];
+      const claims = historyContext.agent_claims ?? [];
+      const signalCount =
+        commits.length + decisions.length + recurring.length + commands.length + claims.length;
+      if (signalCount === 0) return;
+
+      map.set(findingIdx, {
+        findingIdx,
+        file,
+        commits: commits.length,
+        decisions: decisions.length,
+        recurring: recurring.reduce((sum, item) => sum + item.count, 0),
+        commands: commands.length,
+        claims: claims.length,
+        topDecision: decisions[0]?.text,
+        topCommit: commits[0]?.subject,
+        topClaim: claims[0]?.claim,
+        topCommands: commands.slice(0, 2).map(formatHistoryCommandEvidence),
+      });
+    });
+
+    return map;
+  }, [historyContext, sortedFindings]);
+
+  const intentReport = useMemo(() => {
+    if (!result) return null;
+    return buildReviewIntentReport({
+      reviewId: result.review_id,
+      diffRange: result.diff_range || diffRange,
+      changeDescription: changeDesc,
+      findings: sortedFindings.map((finding) => ({
+        severity: finding.severity,
+        title: finding.title,
+        filePath: finding.filePath,
+      })),
+      evidence: sortedFindings.map((finding, idx) => ({
+        ...defaultFindingEvidence,
+        ...evidenceByFinding[findingEvidenceKey(finding, idx)],
+      })),
+      history: historyContext
+        ? {
+          recentCommits: historyContext.recent_commits.length,
+          priorDecisions: historyContext.prior_decisions?.length ?? 0,
+          priorAgentRuns: historyContext.prior_agent_activity.length,
+          recurringFailures: historyContext.recurring_failures.length,
+          commands: historyContext.command_signals?.length ?? 0,
+          claims: historyContext.agent_claims?.length ?? 0,
+          commandStatus: {
+            passed: (historyContext.command_signals ?? []).filter((signal) => signal.status === "passed").length,
+            failed: (historyContext.command_signals ?? []).filter((signal) => signal.status === "failed").length,
+            stale: (historyContext.command_signals ?? []).filter((signal) => signal.status === "stale").length,
+            unknown: (historyContext.command_signals ?? []).filter(
+              (signal) => signal.status == null || signal.status === "unknown",
+            ).length,
+          },
+          commandArtifacts: (historyContext.command_signals ?? []).reduce(
+            (sum, signal) => sum + (signal.artifacts?.length ?? 0),
+            0,
+          ),
+          rawSessionCommands: (historyContext.command_signals ?? []).filter(
+            (signal) => signal.source === "raw_session",
+          ).length,
+          structuredCommands: (historyContext.command_signals ?? []).filter(
+            (signal) => signal.source === "output_structured",
+          ).length,
+          latestCommand: historyContext.command_signals?.[0]?.command ?? null,
+          latestClaim: historyContext.agent_claims?.[0]?.claim ?? null,
+        }
+        : null,
+      qaRuns: qaRunHistory,
+      fix: fixResult
+        ? {
+          changedFiles: fixResult.changed_files.length,
+          findingsFixed: fixResult.findings_fixed,
+        }
+        : null,
+      reviewMode: result.review_mode,
+      riskTier: result.risk_tier,
+      changedLines: result.changed_lines,
+      sensitivePaths: result.sensitive_paths,
+      blast: blastReport
+        ? {
+          totalCallers: blastReport.totalCallers,
+          totalSymbols: blastReport.totalSymbols,
+          changedFiles: blastReport.changedFiles,
+        }
+        : null,
+    });
+  }, [
+    blastReport,
+    changeDesc,
+    diffRange,
+    evidenceByFinding,
+    fixResult,
+    historyContext,
+    qaRunHistory,
+    result,
+    sortedFindings,
+  ]);
+
   const updateFindingEvidence = useCallback(
     (idx: number, patch: Partial<FindingEvidence>) => {
       const finding = sortedFindings[idx];
@@ -894,6 +1139,288 @@ export default function QuickReview() {
     ).catch(() => {});
   }, [evidenceByFinding, result?.review_id]);
 
+  const applyQaWorkflow = useCallback((workflow: Partial<QaWorkflowPreset>) => {
+    if (workflow.baseUrl) setQaBaseUrl(workflow.baseUrl);
+    if (workflow.loopId) setQaLoopId(workflow.loopId);
+    if (
+      workflow.runnerType === "playwright_builtin" ||
+      workflow.runnerType === "external_skill" ||
+      workflow.runnerType === "repo_playwright"
+    ) {
+      setQaRunnerType(workflow.runnerType);
+    }
+    if (workflow.goal) setQaGoal(workflow.goal);
+    if (typeof workflow.targetRoute === "string") {
+      setQaTargetRoute(workflow.targetRoute || CODEVETTER_REVIEW_SHELL.route);
+    }
+    if (typeof workflow.externalCommand === "string") {
+      setQaExternalCommand(workflow.externalCommand);
+    }
+    if (typeof workflow.repoSpecPath === "string") {
+      setQaRepoSpecPath(workflow.repoSpecPath);
+    }
+    if (
+      workflow.repoTraceMode === "off" ||
+      workflow.repoTraceMode === "retain-on-failure" ||
+      workflow.repoTraceMode === "on"
+    ) {
+      setQaRepoTraceMode(workflow.repoTraceMode);
+    }
+    if (workflow.authMode === "none" || workflow.authMode === "storage_state") {
+      setQaAuthMode(workflow.authMode);
+    }
+    if (typeof workflow.storageStatePath === "string") {
+      setQaStorageStatePath(workflow.storageStatePath);
+    }
+    if (typeof workflow.allowRemoteTarget === "boolean") {
+      setQaAllowRemoteTarget(workflow.allowRemoteTarget);
+    }
+    if (Array.isArray(workflow.targets)) {
+      setQaTargets(workflow.targets);
+      const firstTarget = workflow.targets[0];
+      if (firstTarget) {
+        setQaActiveTargetId(firstTarget.id);
+        setQaTargetName(firstTarget.name);
+        setQaTargetRoute(firstTarget.route);
+        setQaGoal(firstTarget.goal);
+      } else {
+        setQaActiveTargetId("");
+      }
+    }
+    if (workflow.name) setQaWorkflowName(workflow.name);
+  }, []);
+
+  const currentQaWorkflow = useCallback((id: string): QaWorkflowPreset => ({
+    id,
+    name: qaWorkflowName.trim() || CODEVETTER_REVIEW_SHELL.label,
+    baseUrl: qaBaseUrl,
+    loopId: qaLoopId,
+    runnerType: qaRunnerType,
+    goal: qaGoal,
+    externalCommand: qaExternalCommand,
+    repoSpecPath: qaRepoSpecPath,
+    repoTraceMode: qaRepoTraceMode,
+    authMode: qaAuthMode,
+    storageStatePath: qaStorageStatePath,
+    targetRoute: qaTargetRoute,
+    allowRemoteTarget: qaAllowRemoteTarget,
+    targets: qaTargets,
+    updatedAt: new Date().toISOString(),
+  }), [
+    qaAllowRemoteTarget,
+    qaAuthMode,
+    qaBaseUrl,
+    qaExternalCommand,
+    qaGoal,
+    qaLoopId,
+    qaRepoSpecPath,
+    qaRepoTraceMode,
+    qaRunnerType,
+    qaStorageStatePath,
+    qaTargetRoute,
+    qaTargets,
+    qaWorkflowName,
+  ]);
+
+  useEffect(() => {
+    async function loadQaWorkflows() {
+      try {
+        const [workflowsRaw, legacyRaw] = await Promise.all([
+          getPreference("quick_review_qa_workflows"),
+          getPreference("quick_review_qa_preset"),
+        ]);
+
+        if (workflowsRaw) {
+          const workflows = JSON.parse(workflowsRaw) as QaWorkflowPreset[];
+          if (Array.isArray(workflows) && workflows.length > 0) {
+            setQaWorkflows(workflows);
+            setQaActiveWorkflowId(workflows[0].id);
+            applyQaWorkflow(workflows[0]);
+            return;
+          }
+        }
+
+        if (legacyRaw) {
+          const legacy = JSON.parse(legacyRaw) as Partial<QaPreset>;
+          applyQaWorkflow({ ...legacy, name: CODEVETTER_REVIEW_SHELL.label });
+        }
+      } catch {
+        // Keep defaults if local preferences are unavailable or malformed.
+      } finally {
+        setQaPresetLoaded(true);
+      }
+    }
+
+    void loadQaWorkflows();
+  }, [applyQaWorkflow]);
+
+  useEffect(() => {
+    if (!qaPresetLoaded) return;
+    const preset: QaPreset = {
+      baseUrl: qaBaseUrl,
+      loopId: qaLoopId,
+      runnerType: qaRunnerType,
+      goal: qaGoal,
+      externalCommand: qaExternalCommand,
+      repoSpecPath: qaRepoSpecPath,
+      repoTraceMode: qaRepoTraceMode,
+      authMode: qaAuthMode,
+      storageStatePath: qaStorageStatePath,
+      targetRoute: qaTargetRoute,
+      allowRemoteTarget: qaAllowRemoteTarget,
+    };
+    void setPreference("quick_review_qa_preset", JSON.stringify(preset)).catch(() => {});
+  }, [
+    qaAuthMode,
+    qaAllowRemoteTarget,
+    qaBaseUrl,
+    qaExternalCommand,
+    qaGoal,
+    qaLoopId,
+    qaPresetLoaded,
+    qaRepoSpecPath,
+    qaRepoTraceMode,
+    qaRunnerType,
+    qaStorageStatePath,
+    qaTargetRoute,
+  ]);
+
+  useEffect(() => {
+    if (!qaPresetLoaded) return;
+    void setPreference("quick_review_qa_workflows", JSON.stringify(qaWorkflows)).catch(() => {});
+  }, [qaPresetLoaded, qaWorkflows]);
+
+  const handleSelectQaWorkflow = useCallback((workflowId: string) => {
+    setQaActiveWorkflowId(workflowId);
+    const workflow = qaWorkflows.find((candidate) => candidate.id === workflowId);
+    if (workflow) applyQaWorkflow(workflow);
+  }, [applyQaWorkflow, qaWorkflows]);
+
+  const handleSaveQaWorkflow = useCallback(() => {
+    const id = qaActiveWorkflowId || `qa-workflow-${Date.now()}`;
+    const next = currentQaWorkflow(id);
+    setQaActiveWorkflowId(id);
+    setQaWorkflows((prev) => {
+      const exists = prev.some((workflow) => workflow.id === id);
+      const updated = exists
+        ? prev.map((workflow) => workflow.id === id ? next : workflow)
+        : [next, ...prev];
+      return updated.slice(0, 12);
+    });
+  }, [currentQaWorkflow, qaActiveWorkflowId]);
+
+  const handleDeleteQaWorkflow = useCallback(() => {
+    if (!qaActiveWorkflowId) return;
+    setQaWorkflows((prev) => prev.filter((workflow) => workflow.id !== qaActiveWorkflowId));
+    setQaActiveWorkflowId("");
+  }, [qaActiveWorkflowId]);
+
+  const handleSelectQaTarget = useCallback((targetId: string) => {
+    setQaActiveTargetId(targetId);
+    const target = qaTargets.find((candidate) => candidate.id === targetId);
+    if (!target) return;
+    setQaTargetName(target.name);
+    setQaTargetRoute(target.route);
+    setQaGoal(target.goal);
+  }, [qaTargets]);
+
+  const handleSaveQaTarget = useCallback(() => {
+    const id = qaActiveTargetId || `qa-target-${Date.now()}`;
+    const next: QaTargetPreset = {
+      id,
+      name: qaTargetName.trim() || qaTargetRoute || CODEVETTER_REVIEW_SHELL.label,
+      route: qaTargetRoute.trim() || CODEVETTER_REVIEW_SHELL.route,
+      goal: qaGoal,
+    };
+    setQaActiveTargetId(id);
+    const exists = qaTargets.some((target) => target.id === id);
+    const updatedTargets = (exists
+      ? qaTargets.map((target) => target.id === id ? next : target)
+      : [next, ...qaTargets]).slice(0, 16);
+    setQaTargets(updatedTargets);
+    if (qaActiveWorkflowId) {
+      setQaWorkflows((prev) =>
+        prev.map((workflow) =>
+          workflow.id === qaActiveWorkflowId
+            ? { ...currentQaWorkflow(workflow.id), targets: updatedTargets }
+            : workflow));
+    }
+  }, [
+    currentQaWorkflow,
+    qaActiveTargetId,
+    qaActiveWorkflowId,
+    qaGoal,
+    qaTargets,
+    qaTargetName,
+    qaTargetRoute,
+  ]);
+
+  const handleDeleteQaTarget = useCallback(() => {
+    if (!qaActiveTargetId) return;
+    const updatedTargets = qaTargets.filter((target) => target.id !== qaActiveTargetId);
+    setQaTargets(updatedTargets);
+    if (qaActiveWorkflowId) {
+      setQaWorkflows((prev) =>
+        prev.map((workflow) =>
+          workflow.id === qaActiveWorkflowId
+            ? { ...currentQaWorkflow(workflow.id), targets: updatedTargets }
+            : workflow));
+    }
+    setQaActiveTargetId("");
+  }, [currentQaWorkflow, qaActiveTargetId, qaActiveWorkflowId, qaTargets]);
+
+  useEffect(() => {
+    if (!result?.review_id) {
+      setQaRunHistory([]);
+      return;
+    }
+    void getPreference(`quick_review_qa_runs_${result.review_id}`)
+      .then((raw) => {
+        if (!raw) {
+          setQaRunHistory([]);
+          return null;
+        }
+        setQaRunHistory(JSON.parse(raw) as QaRunHistoryEntry[]);
+        return null;
+      })
+      .catch(() => setQaRunHistory([]));
+  }, [result?.review_id]);
+
+  useEffect(() => {
+    if (!result?.review_id) return;
+    void setPreference(
+      `quick_review_qa_runs_${result.review_id}`,
+      JSON.stringify(qaRunHistory.slice(0, 8)),
+    ).catch(() => {});
+  }, [qaRunHistory, result?.review_id]);
+
+  const handleDiscoverQaSpecs = useCallback(async () => {
+    if (!repoPath) {
+      setQaSpecError("Select a repository first.");
+      return;
+    }
+    if (!isTauriAvailable()) {
+      setQaSpecError("Spec discovery requires the CodeVetter desktop app (Tauri).");
+      return;
+    }
+    setQaSpecLoading(true);
+    setQaSpecError(null);
+    try {
+      const discovered = await discoverPlaywrightSpecs(repoPath);
+      setQaSpecCandidates(discovered.specs);
+      if (!qaRepoSpecPath && discovered.specs[0]) {
+        setQaRepoSpecPath(discovered.specs[0].path);
+      }
+      if (discovered.specs.length === 0) {
+        setQaSpecError("No Playwright-looking specs found.");
+      }
+    } catch (err) {
+      setQaSpecError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQaSpecLoading(false);
+    }
+  }, [qaRepoSpecPath, repoPath]);
+
   const handleRunSyntheticQa = useCallback(async () => {
     if (!isTauriAvailable()) {
       setQaError("Synthetic QA requires the CodeVetter desktop app (Tauri).");
@@ -902,8 +1429,37 @@ export default function QuickReview() {
     setQaRunning(true);
     setQaError(null);
     try {
-      const run = await runSyntheticQa(qaBaseUrl, qaLoopId);
+      const run = await runSyntheticQa(qaBaseUrl, qaLoopId, {
+        runnerType: qaRunnerType,
+        goal: qaGoal,
+        externalCommand: qaRunnerType === "external_skill" ? qaExternalCommand : undefined,
+        repoPath,
+        specPath: qaRunnerType === "repo_playwright" ? qaRepoSpecPath : undefined,
+        repoTraceMode: qaRunnerType === "repo_playwright" ? qaRepoTraceMode : undefined,
+        authMode: qaAuthMode,
+        storageStatePath: qaAuthMode === "storage_state" ? qaStorageStatePath : undefined,
+        targetRoute: qaTargetRoute,
+        allowRemoteTarget: qaAllowRemoteTarget,
+      });
       setQaLastRun(run);
+      setQaRunHistory((prev) => [
+        {
+          createdAt: new Date().toISOString(),
+          loopId: run.loop_id,
+          runnerType: run.runner_type ?? qaRunnerType,
+          baseUrl: qaBaseUrl,
+          goal: run.goal || qaGoal,
+          route: run.route || qaTargetRoute,
+          authMode: qaAuthMode,
+          pass: run.pass,
+          durationMs: run.duration_ms,
+          notes: run.notes,
+          screenshotPath: run.screenshot_path,
+          artifacts: run.artifacts ?? [],
+          consoleErrors: run.trace?.console_errors?.length ?? 0,
+        },
+        ...prev,
+      ].slice(0, 8));
       if (!run.pass) {
         trackCoreAction("review_run");
       }
@@ -913,7 +1469,119 @@ export default function QuickReview() {
     } finally {
       setQaRunning(false);
     }
-  }, [qaBaseUrl, qaLoopId]);
+  }, [
+    qaAuthMode,
+    qaAllowRemoteTarget,
+    qaBaseUrl,
+    qaExternalCommand,
+    qaGoal,
+    qaLoopId,
+    qaRepoSpecPath,
+    qaRepoTraceMode,
+    qaRunnerType,
+    qaStorageStatePath,
+    qaTargetRoute,
+    repoPath,
+  ]);
+
+  const handleOpenQaArtifact = useCallback(async (artifact: string) => {
+    if (!isTauriAvailable()) {
+      setQaError("Opening artifacts requires the CodeVetter desktop app (Tauri).");
+      return;
+    }
+    try {
+      await openInApp("finder", artifact);
+      setQaError(null);
+    } catch (err) {
+      setQaError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  const handlePreviewQaArtifact = useCallback(async (artifact: string) => {
+    if (!isTauriAvailable()) {
+      setQaError("Previewing artifacts requires the CodeVetter desktop app (Tauri).");
+      return;
+    }
+    if (!canPreviewQaArtifact(artifact)) {
+      setQaError("Preview is only available for text-like artifacts.");
+      return;
+    }
+    setQaArtifactPreviewLoading(true);
+    setQaError(null);
+    try {
+      const preview = await readFilePreview(artifact, 60);
+      setQaArtifactPreview({
+        path: artifact,
+        content: preview.content,
+        language: preview.language,
+        totalLines: preview.total_lines,
+      });
+    } catch (err) {
+      setQaArtifactPreview(null);
+      setQaError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setQaArtifactPreviewLoading(false);
+    }
+  }, []);
+
+  const handleOpenCommandSource = useCallback(async (sourcePath: string) => {
+    if (!isTauriAvailable()) {
+      setError("Opening command sources requires the CodeVetter desktop app (Tauri).");
+      return;
+    }
+    try {
+      await openInApp("finder", sourcePath);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  const handlePreviewCommandSource = useCallback(
+    async (
+      signal: NonNullable<RepoHistoryContext["command_signals"]>[number],
+      key: string,
+    ) => {
+      if (!signal.source_path) {
+        setError("No transcript source path is attached to this command.");
+        return;
+      }
+      if (!isTauriAvailable()) {
+        setError("Previewing command sources requires the CodeVetter desktop app (Tauri).");
+        return;
+      }
+      const line = Math.max(1, signal.source_line ?? 1);
+      setCommandSourcePreviewLoading(key);
+      setError(null);
+      try {
+        if (signal.source === "raw_session") {
+          const preview = await readRawSessionContext(signal.source_path, line, 8, 12);
+          setCommandSourcePreview({
+            key,
+            path: preview.file_path,
+            line: preview.target_line,
+            language: "transcript",
+            items: preview.items,
+          });
+        } else {
+          const preview = await readFileAroundLine(signal.source_path, line, 2, 2);
+          setCommandSourcePreview({
+            key,
+            path: preview.file_path,
+            line: preview.target_line,
+            language: preview.language,
+            lines: preview.lines,
+          });
+        }
+      } catch (err) {
+        setCommandSourcePreview(null);
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setCommandSourcePreviewLoading(null);
+      }
+    },
+    [],
+  );
 
   const applyQaToSelectedFinding = useCallback(() => {
     if (qaLastRun == null || selectedFindingIdx === null) return;
@@ -999,11 +1667,21 @@ export default function QuickReview() {
     if (!fixResult?.worktree_path) return;
     try {
       await revertFiles(fixResult.worktree_path, [filePath]);
-      // Re-fetch diff to update the view
-      const remaining = fixResult.changed_files.filter(f => f.path !== filePath);
-      setFixResult({ ...fixResult, changed_files: remaining });
+      const remaining = await getLocalDiff(fixResult.worktree_path);
+      setFixResult({ ...fixResult, diff: remaining.diff, changed_files: remaining.files });
     } catch (e) {
       setError(`Revert failed: ${String(e)}`);
+    }
+  }, [fixResult]);
+
+  const handleRevertHunk = useCallback(async (filePath: string, hunk: string) => {
+    if (!fixResult?.worktree_path) return;
+    try {
+      await revertDiffHunk(fixResult.worktree_path, filePath, hunk);
+      const remaining = await getLocalDiff(fixResult.worktree_path);
+      setFixResult({ ...fixResult, diff: remaining.diff, changed_files: remaining.files });
+    } catch (e) {
+      setError(`Hunk revert failed: ${String(e)}`);
     }
   }, [fixResult]);
 
@@ -1063,87 +1741,36 @@ export default function QuickReview() {
 
   const handleCopyProof = useCallback(async () => {
     if (!result) return;
-    const notChecked = sortedFindings.length - evidenceCounts.reproduced - evidenceCounts.fixed - evidenceCounts.notReproduced;
-    const statusIcon = (s: VerificationStatus): string => {
-      if (s === "fixed") return "✅";
-      if (s === "reproduced") return "⚠️";
-      if (s === "not_reproduced") return "🔵";
-      return "⏳";
-    };
-    const formatLoc = (finding: CliReviewFinding): string =>
-      finding.filePath
-        ? ` (\`${finding.filePath}${finding.line != null ? `:${finding.line}` : ""}\`)`
-        : "";
-
-    const lines: string[] = [];
-    lines.push(`## Reviewer handoff — ${result.diff_range || "local diff"}`);
-    lines.push("");
-    lines.push(
-      `**Score:** ${Math.round(result.score)}/10 · **Agent:** ${result.agent} · **Findings:** ${sortedFindings.length}`,
-    );
-    lines.push(
-      `**Fixed:** ${evidenceCounts.fixed} · **Reproduced:** ${evidenceCounts.reproduced} · **Not reproduced:** ${evidenceCounts.notReproduced} · **Unchecked:** ${notChecked}`,
-    );
-
-    lines.push("", "### Findings & evidence");
-    if (sortedFindings.length === 0) {
-      lines.push("- _No findings._");
-    } else {
-      sortedFindings.forEach((finding, idx) => {
-        const ev = {
-          ...defaultFindingEvidence,
-          ...evidenceByFinding[findingEvidenceKey(finding, idx)],
-        };
-        const artifact = ev.artifact.trim()
-          ? ` · artifact: \`${ev.artifact.trim()}\``
-          : "";
-        lines.push(
-          `- ${statusIcon(ev.status)} **[${finding.severity.toUpperCase()}]** ${finding.title}${formatLoc(finding)} — ${ev.status.replace("_", " ")}${artifact}`,
-        );
-        const notes = ev.notes.trim();
-        if (notes) {
-          notes.split("\n").forEach((line) => lines.push(`  - ${line}`));
-        }
-      });
-    }
-
-    const nextActions: string[] = [];
-    sortedFindings.forEach((finding, idx) => {
-      const ev = {
+    const evidence = sortedFindings.map((finding, idx) => ({
         ...defaultFindingEvidence,
         ...evidenceByFinding[findingEvidenceKey(finding, idx)],
-      };
-      const sev = `[${finding.severity.toUpperCase()}]`;
-      if (ev.status === "not_checked") {
-        nextActions.push(`- [ ] Verify **${sev}** ${finding.title}${formatLoc(finding)}`);
-      } else if (ev.status === "reproduced") {
-        const artifact = ev.artifact.trim()
-          ? ` (artifact: \`${ev.artifact.trim()}\`)`
-          : "";
-        nextActions.push(
-          `- [ ] Fix **${sev}** ${finding.title}${formatLoc(finding)} — currently reproduced${artifact}`,
-        );
-      } else if (ev.status === "fixed") {
-        buildRevalidationChecklist(finding, ev).forEach((item) => {
-          if (!ev.revalidation[item.id]) {
-            nextActions.push(`- [ ] ${item.label}`);
-          }
-        });
-      }
+      }));
+    const markdown = buildReviewerProofMarkdown({
+      diffRange: result.diff_range,
+      score: result.score,
+      agent: result.agent,
+      findings: sortedFindings,
+      evidence,
+      evidenceCounts,
+      intentReport,
+      historyFindingSummaries,
     });
-    if (nextActions.length > 0) {
-      lines.push("", "### Next actions");
-      lines.push(...nextActions);
-    }
 
     try {
-      await navigator.clipboard.writeText(lines.join("\n"));
+      await navigator.clipboard.writeText(markdown);
       setProofCopied(true);
       setTimeout(() => setProofCopied(false), 2000);
     } catch {
       // clipboard unavailable — fail silently
     }
-  }, [result, sortedFindings, evidenceCounts, evidenceByFinding]);
+  }, [
+    result,
+    sortedFindings,
+    evidenceCounts,
+    evidenceByFinding,
+    intentReport,
+    historyFindingSummaries,
+  ]);
 
   // Track which diff files are expanded
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
@@ -1273,9 +1900,12 @@ export default function QuickReview() {
           <div className="min-w-0 flex-1">
             <div className="cv-label truncate text-slate-300">
               review result · {result.agent}
+              {result.risk_tier ? ` · ${result.risk_tier}` : ""}
             </div>
             <div className="mt-0.5 truncate font-mono text-[10px] uppercase tracking-[0.16em] text-slate-600">
-              {result.diff_range || diffRange || "local diff"}
+              {result.review_mode
+                ? `${result.review_mode} · ${result.diff_range || diffRange || "local diff"}`
+                : result.diff_range || diffRange || "local diff"}
             </div>
           </div>
           <ScoreBadge score={Math.round(result.score)} size="sm" />
@@ -1336,20 +1966,34 @@ export default function QuickReview() {
                             <div>
                               {file.hunks.map((hunk, hi) => (
                                 <div key={hi}>
-                                  {hunk.split("\n").map((line, li) => (
-                                    <div
-                                      key={`${hi}-${li}`}
-                                      className={cn(
-                                        "font-mono text-[12px] leading-[22px] pl-4 pr-4",
-                                        line.startsWith("+") && !line.startsWith("+++") && "bg-emerald-500/[0.07] text-emerald-400 border-l-2 border-emerald-500/30",
-                                        line.startsWith("-") && !line.startsWith("---") && "bg-red-500/[0.07] text-red-400 border-l-2 border-red-500/30",
-                                        line.startsWith("@@") && "bg-[#0a0a0a] text-cyan-500/50 text-[11px] py-1 border-l-2 border-cyan-500/20",
-                                        !line.startsWith("+") && !line.startsWith("-") && !line.startsWith("@@") && "text-slate-500 border-l-2 border-transparent",
-                                      )}
-                                    >
-                                      {line}
-                                    </div>
-                                  ))}
+                                  {hunk.split("\n").map((line, li) => {
+                                    const isHunkHeader = line.startsWith("@@");
+                                    return (
+                                      <div
+                                        key={`${hi}-${li}`}
+                                        className={cn(
+                                          "font-mono text-[12px] leading-[22px] pl-4 pr-4",
+                                          line.startsWith("+") && !line.startsWith("+++") && "bg-emerald-500/[0.07] text-emerald-400 border-l-2 border-emerald-500/30",
+                                          line.startsWith("-") && !line.startsWith("---") && "bg-red-500/[0.07] text-red-400 border-l-2 border-red-500/30",
+                                          isHunkHeader && "flex items-center gap-2 bg-[#0a0a0a] py-1 text-[11px] text-cyan-500/50 border-l-2 border-cyan-500/20",
+                                          !line.startsWith("+") && !line.startsWith("-") && !isHunkHeader && "text-slate-500 border-l-2 border-transparent",
+                                        )}
+                                      >
+                                        <span className="min-w-0 flex-1 truncate">{line}</span>
+                                        {isHunkHeader && (
+                                          <Button
+                                            size="sm"
+                                            variant="ghost"
+                                            onClick={() => handleRevertHunk(file.path, hunk)}
+                                            className="h-5 shrink-0 gap-1 px-1.5 text-[10px] text-slate-600 hover:bg-red-500/10 hover:text-red-400"
+                                          >
+                                            <Undo2 size={10} />
+                                            Revert hunk
+                                          </Button>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
                                 </div>
                               ))}
                             </div>
@@ -1575,6 +2219,70 @@ export default function QuickReview() {
                       Run a browser loop against a local dev server and attach pass/fail
                       evidence to the selected finding.
                     </p>
+                    <div className="mb-2 font-mono text-[9px] uppercase tracking-[0.12em] text-slate-600">
+                      QA workflow saved locally
+                    </div>
+                    <label className="block space-y-1">
+                      <span className="cv-label">Workflow</span>
+                      <select
+                        value={qaActiveWorkflowId}
+                        onChange={(event) => handleSelectQaWorkflow(event.target.value)}
+                        className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 text-xs text-slate-200 outline-none focus:border-[var(--cv-accent)]"
+                      >
+                        <option value="">Unsaved workflow</option>
+                        {qaWorkflows.map((workflow) => (
+                          <option key={workflow.id} value={workflow.id}>
+                            {workflow.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="mt-2 flex items-end gap-2">
+                      <label className="min-w-0 flex-1 space-y-1">
+                        <span className="cv-label">Name</span>
+                        <input
+                          value={qaWorkflowName}
+                          onChange={(event) => setQaWorkflowName(event.target.value)}
+                          placeholder="Review shell"
+                          className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 text-xs text-slate-200 outline-none placeholder:text-slate-700 focus:border-[var(--cv-accent)]"
+                        />
+                      </label>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-8 shrink-0 px-2 text-[10px]"
+                        onClick={handleSaveQaWorkflow}
+                      >
+                        Save
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-8 w-8 shrink-0 px-0 text-slate-600 hover:bg-red-500/10 hover:text-red-400"
+                        disabled={!qaActiveWorkflowId}
+                        onClick={handleDeleteQaWorkflow}
+                        title="Delete workflow"
+                      >
+                        <Trash2 size={13} />
+                      </Button>
+                    </div>
+                    <label className="mt-2 block space-y-1">
+                      <span className="cv-label">Target</span>
+                      <select
+                        value={qaActiveTargetId}
+                        onChange={(event) => handleSelectQaTarget(event.target.value)}
+                        className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 text-xs text-slate-200 outline-none focus:border-[var(--cv-accent)]"
+                      >
+                        <option value="">Unsaved target</option>
+                        {qaTargets.map((target) => (
+                          <option key={target.id} value={target.id}>
+                            {target.name} · {target.route}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                     <label className="block space-y-1">
                       <span className="cv-label">Base URL</span>
                       <input
@@ -1584,11 +2292,75 @@ export default function QuickReview() {
                         className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 font-mono text-xs text-slate-200 outline-none placeholder:text-slate-700 focus:border-[var(--cv-accent)]"
                       />
                     </label>
+                    <label className="mt-2 flex items-center gap-2 text-[10px] text-slate-400">
+                      <input
+                        type="checkbox"
+                        checked={qaAllowRemoteTarget}
+                        onChange={(event) => setQaAllowRemoteTarget(event.target.checked)}
+                        className="h-3 w-3 accent-[var(--cv-accent)]"
+                      />
+                      <span>Allow remote target</span>
+                      {!isLoopbackQaBaseUrl(qaBaseUrl) && !qaAllowRemoteTarget && (
+                        <span className="text-yellow-400">Remote URL blocked</span>
+                      )}
+                    </label>
+                    <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+                      <label className="space-y-1">
+                        <span className="cv-label">Target name</span>
+                        <input
+                          value={qaTargetName}
+                          onChange={(event) => setQaTargetName(event.target.value)}
+                          placeholder="Checkout happy path"
+                          className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 text-xs text-slate-200 outline-none placeholder:text-slate-700 focus:border-[var(--cv-accent)]"
+                        />
+                      </label>
+                      <label className="space-y-1">
+                        <span className="cv-label">Route</span>
+                        <input
+                          value={qaTargetRoute}
+                          onChange={(event) => setQaTargetRoute(event.target.value)}
+                          placeholder="/review"
+                          className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 font-mono text-xs text-slate-200 outline-none placeholder:text-slate-700 focus:border-[var(--cv-accent)]"
+                        />
+                      </label>
+                    </div>
+                    <label className="mt-2 block space-y-1">
+                      <span className="cv-label">Auth</span>
+                      <select
+                        value={qaAuthMode}
+                        onChange={(event) => setQaAuthMode(event.target.value as QaAuthMode)}
+                        className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 text-xs text-slate-200 outline-none focus:border-[var(--cv-accent)]"
+                      >
+                        <option value="none">No auth</option>
+                        <option value="storage_state">Playwright storage state</option>
+                      </select>
+                    </label>
+                    {qaAuthMode === "storage_state" && (
+                      <label className="mt-2 block space-y-1">
+                        <span className="cv-label">Storage state</span>
+                        <input
+                          value={qaStorageStatePath}
+                          onChange={(event) => setQaStorageStatePath(event.target.value)}
+                          placeholder="/path/to/storage-state.json"
+                          className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 font-mono text-xs text-slate-200 outline-none placeholder:text-slate-700 focus:border-[var(--cv-accent)]"
+                        />
+                      </label>
+                    )}
                     <label className="mt-2 block space-y-1">
                       <span className="cv-label">Loop</span>
                       <select
                         value={qaLoopId}
-                        onChange={(event) => setQaLoopId(event.target.value)}
+                        onChange={(event) => {
+                          const nextLoop = SYNTHETIC_QA_LOOPS.find(
+                            (loop) => loop.id === event.target.value,
+                          );
+                          setQaLoopId(event.target.value);
+                          if (nextLoop) {
+                            setQaGoal(nextLoop.goal);
+                            setQaTargetRoute(nextLoop.route);
+                            setQaTargetName(nextLoop.label);
+                          }
+                        }}
                         className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 text-xs text-slate-200 outline-none focus:border-[var(--cv-accent)]"
                       >
                         {SYNTHETIC_QA_LOOPS.map((loop) => (
@@ -1598,6 +2370,127 @@ export default function QuickReview() {
                         ))}
                       </select>
                     </label>
+                    <label className="mt-2 block space-y-1">
+                      <span className="cv-label">Runner</span>
+                      <select
+                        value={qaRunnerType}
+                        onChange={(event) =>
+                          setQaRunnerType(
+                            event.target.value as QaRunnerType,
+                          )
+                        }
+                        className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 text-xs text-slate-200 outline-none focus:border-[var(--cv-accent)]"
+                      >
+                        <option value="playwright_builtin">Built-in Playwright</option>
+                        <option value="repo_playwright">Repo Playwright spec</option>
+                        <option value="external_skill">External skill</option>
+                      </select>
+                    </label>
+                    {qaRunnerType === "repo_playwright" && (
+                      <div className="mt-2 space-y-2">
+                        <div className="flex items-end gap-2">
+                          <label className="min-w-0 flex-1 space-y-1">
+                            <span className="cv-label">Spec</span>
+                            <input
+                              value={qaRepoSpecPath}
+                              onChange={(event) => setQaRepoSpecPath(event.target.value)}
+                              placeholder="tests/review.spec.ts"
+                              className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 font-mono text-xs text-slate-200 outline-none placeholder:text-slate-700 focus:border-[var(--cv-accent)]"
+                            />
+                          </label>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-8 shrink-0 px-2 text-[10px]"
+                            disabled={qaSpecLoading || !repoPath}
+                            onClick={() => void handleDiscoverQaSpecs()}
+                          >
+                            {qaSpecLoading ? (
+                              <Loader2 size={12} className="animate-spin" />
+                            ) : (
+                              <RefreshCw size={12} />
+                            )}
+                            Find
+                          </Button>
+                        </div>
+                        {qaSpecCandidates.length > 0 && (
+                          <select
+                            value={qaRepoSpecPath}
+                            onChange={(event) => setQaRepoSpecPath(event.target.value)}
+                            className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 font-mono text-[11px] text-slate-200 outline-none focus:border-[var(--cv-accent)]"
+                          >
+                            {qaSpecCandidates.map((spec) => (
+                              <option key={spec.path} value={spec.path}>
+                                {spec.path} · {spec.reason}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        <label className="block space-y-1">
+                          <span className="cv-label">Trace</span>
+                          <select
+                            value={qaRepoTraceMode}
+                            onChange={(event) =>
+                              setQaRepoTraceMode(event.target.value as QaRepoTraceMode)
+                            }
+                            className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 text-xs text-slate-200 outline-none focus:border-[var(--cv-accent)]"
+                          >
+                            <option value="retain-on-failure">Retain on failure</option>
+                            <option value="on">Always capture</option>
+                            <option value="off">Off</option>
+                          </select>
+                        </label>
+                        {qaSpecError && (
+                          <p className="text-[10px] text-yellow-400">{qaSpecError}</p>
+                        )}
+                      </div>
+                    )}
+                    {qaRunnerType === "external_skill" && (
+                      <label className="mt-2 block space-y-1">
+                        <span className="cv-label">Command</span>
+                        <input
+                          value={qaExternalCommand}
+                          onChange={(event) => setQaExternalCommand(event.target.value)}
+                          placeholder="claude-synthetic-qa"
+                          className="w-full rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 font-mono text-xs text-slate-200 outline-none placeholder:text-slate-700 focus:border-[var(--cv-accent)]"
+                        />
+                      </label>
+                    )}
+                    <label className="mt-2 block space-y-1">
+                      <span className="cv-label">Goal</span>
+                      <textarea
+                        value={qaGoal}
+                        onChange={(event) => setQaGoal(event.target.value)}
+                        rows={3}
+                        className="w-full resize-none rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 text-xs leading-5 text-slate-200 outline-none placeholder:text-slate-700 focus:border-[var(--cv-accent)]"
+                      />
+                    </label>
+                    <div className="mt-2 flex items-center gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2 text-[10px]"
+                        onClick={handleSaveQaTarget}
+                      >
+                        Save target
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 w-7 px-0 text-slate-600 hover:bg-red-500/10 hover:text-red-400"
+                        disabled={!qaActiveTargetId}
+                        onClick={handleDeleteQaTarget}
+                        title="Delete target"
+                      >
+                        <Trash2 size={12} />
+                      </Button>
+                      <span className="min-w-0 truncate font-mono text-[9px] text-slate-600">
+                        {qaTargets.length} saved
+                      </span>
+                    </div>
                     <Button
                       type="button"
                       size="sm"
@@ -1639,6 +2532,76 @@ export default function QuickReview() {
                             {qaLastRun.screenshot_path}
                           </p>
                         )}
+                        {(qaLastRun.artifacts ?? []).length > 0 && (
+                          <div className="mt-2 space-y-1">
+                            <div className="font-mono uppercase tracking-wider text-slate-500">
+                              Artifacts
+                            </div>
+                            {(qaLastRun.artifacts ?? []).slice(0, 4).map((artifact) => (
+                              <div
+                                key={artifact}
+                                className="flex min-w-0 items-center gap-1.5 font-mono text-slate-500"
+                              >
+                                <span className="shrink-0 rounded border border-[var(--cv-line)] px-1 py-0.5 uppercase tracking-wider text-slate-400">
+                                  {qaArtifactLabel(artifact)}
+                                </span>
+                                <span className="min-w-0 truncate">{artifact}</span>
+                                {canPreviewQaArtifact(artifact) && (
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-5 w-5 shrink-0 text-slate-500 hover:text-slate-200"
+                                    title="Preview artifact"
+                                    disabled={qaArtifactPreviewLoading}
+                                    onClick={() => void handlePreviewQaArtifact(artifact)}
+                                  >
+                                    {qaArtifactPreviewLoading && qaArtifactPreview?.path === artifact ? (
+                                      <Loader2 size={11} className="animate-spin" />
+                                    ) : (
+                                      <FileCode size={11} />
+                                    )}
+                                  </Button>
+                                )}
+                                <Button
+                                  type="button"
+                                  size="icon"
+                                  variant="ghost"
+                                  className="h-5 w-5 shrink-0 text-slate-500 hover:text-slate-200"
+                                  title="Open artifact"
+                                  onClick={() => void handleOpenQaArtifact(artifact)}
+                                >
+                                  <ExternalLink size={11} />
+                                </Button>
+                              </div>
+                            ))}
+                            {qaArtifactPreview && (
+                              <div className="mt-2 rounded border border-[var(--cv-line)] bg-[#050505] p-2">
+                                <div className="mb-1 flex min-w-0 items-center gap-2 font-mono text-[9px] text-slate-500">
+                                  <span className="min-w-0 flex-1 truncate">
+                                    {qaArtifactPreview.path}
+                                  </span>
+                                  <span className="shrink-0">
+                                    {qaArtifactPreview.language} · {Math.min(60, qaArtifactPreview.totalLines)}/{qaArtifactPreview.totalLines} lines
+                                  </span>
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-5 w-5 shrink-0 text-slate-500 hover:text-slate-200"
+                                    title="Close preview"
+                                    onClick={() => setQaArtifactPreview(null)}
+                                  >
+                                    <Trash2 size={10} />
+                                  </Button>
+                                </div>
+                                <pre className="max-h-44 overflow-auto whitespace-pre-wrap rounded bg-black/40 p-2 font-mono text-[9px] leading-4 text-slate-300">
+                                  {qaArtifactPreview.content || "(empty file)"}
+                                </pre>
+                              </div>
+                            )}
+                          </div>
+                        )}
                         <div className="mt-2 flex flex-wrap gap-2">
                           <Button
                             type="button"
@@ -1662,6 +2625,38 @@ export default function QuickReview() {
                             </Button>
                           )}
                         </div>
+                      </div>
+                    )}
+                    {qaRunHistory.length > 0 && (
+                      <div className="mt-3 rounded-lg border border-[var(--cv-line)] bg-[#050505] p-2">
+                        <div className="cv-label text-slate-500">Recent QA runs</div>
+                        <ul className="mt-1.5 space-y-1">
+                          {qaRunHistory.slice(0, 3).map((run) => (
+                            <li
+                              key={`${run.createdAt}-${run.loopId}`}
+                              className="flex items-start gap-2 text-[10px] leading-4 text-slate-400"
+                            >
+                              <span
+                                className={cn(
+                                  "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
+                                  run.pass ? "bg-emerald-400" : "bg-red-400",
+                                )}
+                              />
+                              <span className="min-w-0 flex-1">
+                                <span className="font-mono text-slate-500">
+                                  {run.runnerType}
+                                </span>{" "}
+                                {run.pass ? "passed" : "failed"} in {run.durationMs}ms
+                                {run.route ? ` · ${run.route}` : ""}
+                                {run.authMode === "storage_state" ? " · auth" : ""}
+                                {run.consoleErrors > 0 ? ` · ${run.consoleErrors} console` : ""}
+                                {(run.artifacts ?? []).length > 0
+                                  ? ` · ${(run.artifacts ?? []).length} artifact`
+                                  : ""}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
                       </div>
                     )}
                   </div>
@@ -1907,6 +2902,11 @@ export default function QuickReview() {
                     evidence.status !== "not_checked" ||
                     Boolean(evidence.artifact.trim()) ||
                     Boolean(evidence.notes.trim());
+                  const historySummary = historyFindingSummaries.get(idx);
+                  const historySample =
+                    historySummary?.topDecision ??
+                    historySummary?.topCommit ??
+                    historySummary?.topClaim;
                   return (
                     <div
                       key={idx}
@@ -1968,11 +2968,98 @@ export default function QuickReview() {
                       <p className="mt-2 line-clamp-2 text-[11px] leading-5 text-slate-500">
                         {finding.summary}
                       </p>
+                      {historySummary && (
+                        <div className="mt-2 rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-1.5">
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[9px] uppercase text-slate-600">
+                            <span>history</span>
+                            {historySummary.decisions > 0 && (
+                              <span className="text-cyan-400">
+                                {historySummary.decisions} decision
+                              </span>
+                            )}
+                            {historySummary.commits > 0 && (
+                              <span>{historySummary.commits} commit</span>
+                            )}
+                            {historySummary.recurring > 0 && (
+                              <span className="text-yellow-400">
+                                {historySummary.recurring} recurring
+                              </span>
+                            )}
+                            {historySummary.commands > 0 && (
+                              <span>{historySummary.commands} command</span>
+                            )}
+                            {historySummary.claims > 0 && (
+                              <span>{historySummary.claims} claim</span>
+                            )}
+                          </div>
+                          {historySample && (
+                            <p className="mt-1 line-clamp-1 text-[10px] leading-4 text-slate-500">
+                              {historySample}
+                            </p>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
               </div>
             </div>
+
+            {/* Intent-level verification gaps */}
+            {intentReport && (
+              <div className="shrink-0 border-t border-[var(--cv-line)] bg-[#07080a] px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <GitCommitHorizontal size={12} className="shrink-0 text-cyan-300" />
+                  <span className="cv-label min-w-0 flex-1 truncate text-slate-300">
+                    Intent check · {intentReport.changedSurfaces.join(", ")}
+                  </span>
+                </div>
+                <p className="mt-1 truncate text-[10px] leading-4 text-slate-500">
+                  {intentReport.inferredIntent}
+                </p>
+                {intentReport.timeline.length > 0 && (
+                  <div className="mt-2 grid grid-cols-1 gap-1.5">
+                    {intentReport.timeline.slice(0, 5).map((item) => (
+                      <div
+                        key={item.id}
+                        className="flex items-start gap-2 rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-1.5"
+                      >
+                        <span
+                          className={cn(
+                            "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
+                            item.status === "done" && "bg-emerald-400",
+                            item.status === "warning" && "bg-yellow-400",
+                            item.status === "missing" && "bg-slate-600",
+                          )}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[10px] text-slate-300">
+                            {item.label}
+                          </span>
+                          <span className="block truncate text-[10px] text-slate-600">
+                            {item.detail}
+                          </span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {(intentReport.verificationGaps.length > 0 ||
+                  intentReport.suspectedRisks.length > 0) && (
+                    <ul className="mt-1.5 space-y-1">
+                      {[
+                        ...intentReport.verificationGaps.slice(0, 2),
+                        ...intentReport.suspectedRisks.slice(0, 1),
+                      ].map((item) => (
+                        <li key={item} className="flex items-start gap-2">
+                          <AlertTriangle size={10} className="mt-0.5 shrink-0 text-yellow-400" />
+                          <span className="text-[10px] leading-4 text-slate-400">{item}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+              </div>
+            )}
 
             {/* Unchecked-finding risk summary — why "unchecked" still matters */}
             {uncheckedFindings.length > 0 && (
@@ -2292,6 +3379,31 @@ export default function QuickReview() {
                   </div>
                   {!historyLoading && historyContext && (
                     <div className="space-y-1 pl-1 text-[10px] text-slate-300">
+                      {historyFileSummaries.length > 0 && (
+                        <div>
+                          <span className="text-slate-500">File summaries:</span>
+                          <ul className="mt-1 space-y-1">
+                            {historyFileSummaries.map((summary) => (
+                              <li
+                                key={summary.file}
+                                className="rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-1"
+                              >
+                                <span className="block truncate font-mono text-[9px] text-slate-300">
+                                  {summary.file}
+                                </span>
+                                <span className="mt-0.5 block text-[9px] text-slate-500">
+                                  {[
+                                    summary.decisions ? `${summary.decisions} decision` : null,
+                                    summary.commits ? `${summary.commits} commit` : null,
+                                    summary.agents ? `${summary.agents} agent` : null,
+                                    summary.recurring ? `${summary.recurring} recurring` : null,
+                                  ].filter(Boolean).join(" · ")}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                       {historyContext.recent_commits && historyContext.recent_commits.length > 0 && (
                         <div>
                           <span className="text-slate-500">Recent commits:</span>
@@ -2302,10 +3414,171 @@ export default function QuickReview() {
                           </ul>
                         </div>
                       )}
+                      {historyContext.prior_decisions && historyContext.prior_decisions.length > 0 && (
+                        <div>
+                          <span className="text-slate-500">Prior decisions:</span>
+                          <ul className="mt-0.5 list-disc pl-4 font-mono text-[9px] text-slate-400">
+                            {historyContext.prior_decisions.slice(0, 3).map((d, i) => (
+                              <li key={i}>
+                                {d.file}{d.line ? `:${d.line}` : ""}: {d.text}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                       {historyContext.prior_agent_activity && historyContext.prior_agent_activity.length > 0 && (
                         <div>
                           <span className="text-slate-500">Prior agent:</span>{" "}
                           {historyContext.prior_agent_activity[0].summary || "(summary)"}
+                        </div>
+                      )}
+                      {historyContext.command_signals && historyContext.command_signals.length > 0 && (
+                        <div>
+                          <span className="text-slate-500">Commands:</span>
+                          <div className="mt-0.5 font-mono text-[9px] text-slate-500">
+                            {[
+                              `${historyContext.command_signals.length} total`,
+                              `${historyContext.command_signals.filter((signal) => signal.source === "raw_session").length} raw session`,
+                              `${historyContext.command_signals.filter((signal) => signal.source === "output_structured").length} structured`,
+                            ].join(" · ")}
+                          </div>
+                          <ul className="mt-0.5 list-disc pl-4 font-mono text-[9px] text-slate-400">
+                            {historyContext.command_signals.slice(0, 3).map((signal, i) => {
+                              const signalKey = `${signal.event_id ?? signal.date}-${i}`;
+                              return (
+                                <li key={signalKey}>
+                                  {signal.agent}: {signal.command}
+                                  {signal.status && signal.status !== "unknown"
+                                    ? ` · ${signal.status}`
+                                    : ""}
+                                  {signal.source
+                                    ? ` · ${signal.source}${signal.source_line ? `:${signal.source_line}` : ""}`
+                                    : ""}
+                                  {signal.artifacts && signal.artifacts.length > 0
+                                    ? ` · ${signal.artifacts.length} artifact · ${signal.artifacts[0]}`
+                                    : ""}
+                                  {signal.context_excerpt && signal.context_excerpt.length > 0 && (
+                                    <div className="mt-0.5 space-y-0.5 text-[9px] text-slate-500">
+                                      {signal.context_excerpt.slice(0, 2).map((excerpt) => (
+                                        <div key={excerpt} className="break-words">
+                                          {excerpt}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {signal.source_path && (
+                                    <>
+                                      <Button
+                                        type="button"
+                                        size="icon"
+                                        variant="ghost"
+                                        className="ml-1 inline-flex h-4 w-4 align-middle text-slate-500 hover:text-slate-200"
+                                        title="Preview transcript excerpt"
+                                        disabled={commandSourcePreviewLoading !== null}
+                                        onClick={() => void handlePreviewCommandSource(signal, signalKey)}
+                                      >
+                                        {commandSourcePreviewLoading === signalKey ? (
+                                          <Loader2 size={10} className="animate-spin" />
+                                        ) : (
+                                          <FileCode size={10} />
+                                        )}
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        size="icon"
+                                        variant="ghost"
+                                        className="ml-0.5 inline-flex h-4 w-4 align-middle text-slate-500 hover:text-slate-200"
+                                        title="Open source transcript"
+                                        onClick={() => void handleOpenCommandSource(signal.source_path!)}
+                                      >
+                                        <ExternalLink size={10} />
+                                      </Button>
+                                    </>
+                                  )}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                          {commandSourcePreview && (
+                            <div className="mt-2 rounded border border-[var(--cv-line)] bg-[#050505] p-2 font-mono text-[9px] text-slate-400">
+                              <div className="mb-1 flex items-center justify-between gap-2 text-[9px] uppercase tracking-[0.12em] text-slate-600">
+                                <span className="truncate" title={commandSourcePreview.path}>
+                                  {commandSourcePreview.path}:{commandSourcePreview.line}
+                                </span>
+                                <div className="flex shrink-0 items-center gap-1">
+                                  <span>{commandSourcePreview.language}</span>
+                                  <Button
+                                    type="button"
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-4 w-4 text-slate-500 hover:text-slate-200"
+                                    title="Close transcript preview"
+                                    onClick={() => setCommandSourcePreview(null)}
+                                  >
+                                    <X size={10} />
+                                  </Button>
+                                </div>
+                              </div>
+                              <div className="max-h-36 overflow-auto rounded bg-black/30">
+                                {commandSourcePreview.items && commandSourcePreview.items.length > 0 ? (
+                                  commandSourcePreview.items.map((item) => (
+                                    <div
+                                      key={`${item.line}-${item.kind}`}
+                                      className={cn(
+                                        "grid grid-cols-[34px_66px_1fr] gap-2 px-2 py-1",
+                                        item.highlight && "bg-amber-500/10 text-amber-200",
+                                      )}
+                                    >
+                                      <span className="text-right text-slate-600">{item.line}</span>
+                                      <span className="uppercase text-slate-600">
+                                        {item.kind}
+                                      </span>
+                                      <span className="min-w-0 break-words">
+                                        <span className="text-slate-500">{item.role}</span>
+                                        {item.status && item.status !== "unknown" ? (
+                                          <span className="text-slate-500"> · {item.status}</span>
+                                        ) : null}
+                                        {item.artifacts && item.artifacts.length > 0 ? (
+                                          <span className="text-slate-500"> · {item.artifacts.length} artifact</span>
+                                        ) : null}
+                                        <span className="block whitespace-pre-wrap">{item.text}</span>
+                                      </span>
+                                    </div>
+                                  ))
+                                ) : commandSourcePreview.lines && commandSourcePreview.lines.length > 0 ? (
+                                  commandSourcePreview.lines.map((line) => (
+                                    <div
+                                      key={line.line}
+                                      className={cn(
+                                        "grid grid-cols-[34px_1fr] gap-2 px-2 py-0.5",
+                                        line.highlight && "bg-amber-500/10 text-amber-200",
+                                      )}
+                                    >
+                                      <span className="text-right text-slate-600">{line.line}</span>
+                                      <span className="break-all whitespace-pre-wrap">{line.text}</span>
+                                    </div>
+                                  ))
+                                ) : (
+                                  <div className="px-2 py-1 text-slate-600">(no excerpt available)</div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {historyContext.agent_claims && historyContext.agent_claims.length > 0 && (
+                        <div>
+                          <span className="text-slate-500">Agent claims:</span>
+                          <ul className="mt-0.5 list-disc pl-4 font-mono text-[9px] text-slate-400">
+                            {historyContext.agent_claims.slice(0, 3).map((claim, i) => (
+                              <li key={`${claim.date}-${i}`}>
+                                {claim.agent}: {claim.claim}
+                                {claim.source
+                                  ? ` · ${claim.source}${claim.source_line ? `:${claim.source_line}` : ""}`
+                                  : ""}
+                              </li>
+                            ))}
+                          </ul>
                         </div>
                       )}
                       {historyContext.recurring_failures && historyContext.recurring_failures.length > 0 && (

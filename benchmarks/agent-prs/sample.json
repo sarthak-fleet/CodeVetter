@@ -1,0 +1,136 @@
+{
+  "name": "CodeVetter agent PR catch-rate sample",
+  "version": 1,
+  "notes": "Small fixture proving the harness shape. Replace with real public agent PRs before publishing benchmark claims.",
+  "cases": [
+    {
+      "id": "agent-ui-regression-001",
+      "title": "Agent removes the empty state action from a review page",
+      "source": {
+        "repo": "example/local-fixture",
+        "diff_range": "fixture/ui-regression"
+      },
+      "ground_truth": [
+        {
+          "id": "missing-empty-state-action",
+          "severity": "medium",
+          "filePath": "src/pages/QuickReview.tsx",
+          "title": "Empty state no longer lets the user start a review",
+          "evidence": "The changed review empty state removes the only visible start-review action."
+        }
+      ],
+      "reviews": {
+        "codevetter": [
+          {
+            "severity": "medium",
+            "filePath": "src/pages/QuickReview.tsx",
+            "title": "Review empty state lost its primary action",
+            "matched_ground_truth": ["missing-empty-state-action"],
+            "match_rationale": "The finding identifies the same missing primary action in the empty review state."
+          },
+          {
+            "severity": "low",
+            "filePath": "src/pages/QuickReview.tsx",
+            "title": "Button label could be clearer",
+            "matched_ground_truth": []
+          }
+        ],
+        "baseline": []
+      }
+    },
+    {
+      "id": "agent-auth-boundary-001",
+      "title": "Agent moves authorization check to the client",
+      "source": {
+        "repo": "example/local-fixture",
+        "diff_range": "fixture/auth-boundary"
+      },
+      "ground_truth": [
+        {
+          "id": "client-only-authz",
+          "severity": "high",
+          "filePath": "src-tauri/src/commands/review.rs",
+          "title": "Authorization is only enforced in the UI",
+          "evidence": "The command path can still execute when the frontend authorization branch is bypassed."
+        },
+        {
+          "id": "missing-regression-test",
+          "severity": "medium",
+          "filePath": "src-tauri/src/commands/review.rs",
+          "title": "No regression test covers unauthorized command access",
+          "evidence": "No backend regression test asserts unauthorized command invocation is rejected."
+        }
+      ],
+      "reviews": {
+        "codevetter": [
+          {
+            "severity": "high",
+            "filePath": "src-tauri/src/commands/review.rs",
+            "title": "Backend command trusts client-side authorization",
+            "matched_ground_truth": ["client-only-authz"],
+            "match_rationale": "The finding flags the same backend authorization boundary failure."
+          }
+        ],
+        "baseline": [
+          {
+            "severity": "low",
+            "filePath": "src-tauri/src/commands/review.rs",
+            "title": "Add a test",
+            "matched_ground_truth": ["missing-regression-test"],
+            "match_rationale": "The baseline finding only covers the missing test issue, not the auth-boundary bug."
+          }
+        ]
+      }
+    },
+    {
+      "id": "agent-history-context-001",
+      "title": "Agent drops prior-decision context from review prompt",
+      "source": {
+        "repo": "example/local-fixture",
+        "diff_range": "fixture/history-context"
+      },
+      "ground_truth": [
+        {
+          "id": "missing-prior-decision-prompt",
+          "severity": "high",
+          "filePath": "src-tauri/src/commands/git.rs",
+          "title": "Review prompt no longer includes prior project decisions",
+          "evidence": "Prior decision signals are mined but omitted from the prompt passed to reviewers."
+        },
+        {
+          "id": "missing-file-history-proof",
+          "severity": "medium",
+          "filePath": "src/pages/QuickReview.tsx",
+          "title": "Finding proof no longer shows file-linked history",
+          "evidence": "Finding cards and copied proof no longer include the matching file-history context."
+        }
+      ],
+      "reviews": {
+        "codevetter": [
+          {
+            "severity": "high",
+            "filePath": "src-tauri/src/commands/git.rs",
+            "title": "Prior decision markers are mined but omitted from reviewer prompt",
+            "matched_ground_truth": ["missing-prior-decision-prompt"],
+            "match_rationale": "The finding matches the prompt omission of prior decision markers."
+          },
+          {
+            "severity": "medium",
+            "filePath": "src/pages/QuickReview.tsx",
+            "title": "Finding cards lost their per-file history evidence",
+            "matched_ground_truth": ["missing-file-history-proof"],
+            "match_rationale": "The finding matches the missing file-linked history proof in the Review UI."
+          }
+        ],
+        "baseline": [
+          {
+            "severity": "medium",
+            "filePath": "src/pages/QuickReview.tsx",
+            "title": "History panel looks sparse",
+            "matched_ground_truth": []
+          }
+        ]
+      }
+    }
+  ]
+}
