@@ -4,8 +4,8 @@ import { describe, it } from "node:test";
 import {
   syntheticQaFailureFinding,
   syntheticQaToFindingEvidence,
-} from "./apply-evidence.ts";
-import type { SyntheticQaRunResult } from "./types.ts";
+} from "./apply-evidence";
+import type { SyntheticQaRunResult } from "./types";
 
 const baseRun: SyntheticQaRunResult = {
   loop_id: "codevetter-review-shell",

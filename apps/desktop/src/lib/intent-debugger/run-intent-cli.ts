@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { COMMIT_INTENT_FIXTURES, getCommitIntentFixture } from "./fixtures.ts";
-import { buildCommitIntentReport, renderCommitIntentMarkdown } from "./report.ts";
+import { COMMIT_INTENT_FIXTURES, getCommitIntentFixture } from "./fixtures";
+import { buildCommitIntentReport, renderCommitIntentMarkdown } from "./report";
 
 function usage(): never {
   process.stderr.write(
@@ -21,7 +21,8 @@ function main() {
   const id = process.argv[2];
   if (!id) usage();
   const outDir = process.argv[3] ?? path.join(process.cwd(), "intent-debugger-artifacts");
-  const fixtures = id === "all" ? COMMIT_INTENT_FIXTURES : [getCommitIntentFixture(id)].filter(Boolean);
+  const fixture = id === "all" ? null : getCommitIntentFixture(id);
+  const fixtures = id === "all" ? COMMIT_INTENT_FIXTURES : fixture ? [fixture] : [];
   if (fixtures.length === 0) usage();
 
   fs.mkdirSync(outDir, { recursive: true });

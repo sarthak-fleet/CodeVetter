@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { runFixture } from "./fixture-runner.ts";
-import { getSyntheticQaFixture, SYNTHETIC_QA_FIXTURES } from "./fixtures/index.ts";
+import { runFixture } from "./fixture-runner";
+import { getSyntheticQaFixture, SYNTHETIC_QA_FIXTURES } from "./fixtures";
 
 function usage(): never {
   const ids = SYNTHETIC_QA_FIXTURES.map((f) => `  - ${f.id}  (${f.variant})`).join("\n");
@@ -41,10 +41,8 @@ function main() {
   const artifactDir =
     process.argv[3] ?? path.join(process.cwd(), "synthetic-qa-artifacts", String(Date.now()));
 
-  const fixtures =
-    fixtureArg === "all"
-      ? SYNTHETIC_QA_FIXTURES
-      : [getSyntheticQaFixture(fixtureArg)].filter(Boolean) as typeof SYNTHETIC_QA_FIXTURES;
+  const fixture = fixtureArg === "all" ? null : getSyntheticQaFixture(fixtureArg);
+  const fixtures = fixtureArg === "all" ? SYNTHETIC_QA_FIXTURES : fixture ? [fixture] : [];
 
   if (fixtures.length === 0) {
     process.stderr.write(`Unknown fixture id: ${fixtureArg}\n`);

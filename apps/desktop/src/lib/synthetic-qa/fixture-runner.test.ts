@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { runFixture } from "./fixture-runner.ts";
-import { REVIEW_BROKEN_FIXTURE } from "./fixtures/review-broken.ts";
-import { REVIEW_HAPPY_FIXTURE } from "./fixtures/review-happy.ts";
+import { runFixture } from "./fixture-runner";
+import { REVIEW_BROKEN_FIXTURE } from "./fixtures/review-broken";
+import { REVIEW_HAPPY_FIXTURE } from "./fixtures/review-happy";
 
 describe("runFixture — happy fixture", () => {
   const run = runFixture(REVIEW_HAPPY_FIXTURE);

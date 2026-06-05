@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { COMMIT_INTENT_FIXTURES } from "./fixtures.ts";
+import { COMMIT_INTENT_FIXTURES } from "./fixtures";
 import {
   buildCommitIntentReport,
   buildReviewIntentReport,
   renderCommitIntentMarkdown,
-} from "./report.ts";
+} from "./report";
 
 describe("buildCommitIntentReport", () => {
   it("flags agent-authored UI changes as needing flow proof", () => {
