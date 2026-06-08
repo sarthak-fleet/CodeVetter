@@ -1,6 +1,6 @@
 # Project Status
 
-Last updated: 2026-06-05
+Last updated: 2026-06-08
 
 ## Current Scope
 
@@ -21,11 +21,12 @@ CodeVetter is a local-first desktop workbench for checking agent-generated code.
 
 ## Planned Next
 
-1. Curate 20-30 real public agent-generated PR benchmark cases with hand-labeled ground truth before making external catch-rate claims.
-2. Add full multi-turn conversation reconstruction around raw command events when review needs more than the normalized command/result window; current history context already extracts anchored shell/tool command events from indexed Claude/Codex JSONL sessions, handles common OpenAI/Gemini tool-call shapes, shows raw/structured command counts, includes bounded normalized context excerpts, previews wider normalized transcript windows, and opens source transcript files.
-3. Curate real CodeRabbit free-tier and Claude Code `/review` outputs into the named benchmark comparator slots.
-4. Curate larger public benchmark fixtures.
-5. Add richer screenshot/report previews once the local preview security model is explicit; text-like QA artifacts already have bounded inline previews.
+1. Pick up the Review Memory Graph PRD in `docs/PRD-REVIEW-MEMORY-GRAPH.md`: start with a Graphify/Hunk spike, then add a CodeVetter-owned local graph for changed-file review context without making either tool a required dependency.
+2. Curate 20-30 real public agent-generated PR benchmark cases with hand-labeled ground truth before making external catch-rate claims.
+3. Add full multi-turn conversation reconstruction around raw command events when review needs more than the normalized command/result window; current history context already extracts anchored shell/tool command events from indexed Claude/Codex JSONL sessions, handles common OpenAI/Gemini tool-call shapes, shows raw/structured command counts, includes bounded normalized context excerpts, previews wider normalized transcript windows, and opens source transcript files.
+4. Curate real CodeRabbit free-tier and Claude Code `/review` outputs into the named benchmark comparator slots.
+5. Curate larger public benchmark fixtures.
+6. Add richer screenshot/report previews once the local preview security model is explicit; text-like QA artifacts already have bounded inline previews.
 
 ## Deferred / Parked
 
