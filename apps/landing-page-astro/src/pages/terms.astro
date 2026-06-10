@@ -1,0 +1,45 @@
+---
+import Layout from '@/layouts/Layout.astro';
+import Nav from '@/components/Nav.astro';
+import Footer from '@/components/Footer.astro';
+---
+
+<Layout
+  title="Terms — CodeVetter"
+  description="Terms of use for CodeVetter desktop software and codevetter.com."
+  path="/terms"
+>
+  <main class="min-h-screen bg-stone-950 text-stone-200">
+    <Nav />
+    <article class="mx-auto max-w-3xl px-4 py-16 leading-7 pt-32">
+      <a href="/" class="text-xs text-stone-500 hover:text-amber-400">← CodeVetter</a>
+      <h1 class="mt-3 text-3xl font-bold tracking-tight text-white">Terms of Use</h1>
+      <p class="mt-3 text-xs text-stone-500">Last updated: 2026-06-10.</p>
+
+      <h2 class="mt-8 text-base font-semibold text-white">Software</h2>
+      <p class="mt-2 text-sm">
+        CodeVetter is open-source desktop software (ISC License). You may use, modify, and
+        distribute it under that license. Binaries from GitHub Releases are provided as-is.
+      </p>
+
+      <h2 class="mt-8 text-base font-semibold text-white">No warranty</h2>
+      <p class="mt-2 text-sm">
+        Code review output is assistive, not authoritative. You remain responsible for what you
+        ship. Do not rely on CodeVetter as a substitute for human review or security testing.
+      </p>
+
+      <h2 class="mt-8 text-base font-semibold text-white">Third-party CLIs</h2>
+      <p class="mt-2 text-sm">
+        When you route reviews through Claude, Codex, Gemini, or other CLIs, their terms apply to
+        those API/CLI calls. CodeVetter does not store your repo on a central server.
+      </p>
+
+      <h2 class="mt-8 text-base font-semibold text-white">Contact</h2>
+      <p class="mt-2 text-sm">
+        <a href="mailto:hello@codevetter.dev" class="text-amber-400 hover:underline">hello@codevetter.dev</a>
+        · <a href="https://sarthakagrawal.dev" class="text-amber-400 hover:underline">sarthakagrawal.dev</a>
+      </p>
+    </article>
+    <Footer />
+  </main>
+</Layout>

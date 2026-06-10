@@ -3,6 +3,7 @@
   "type": "module",
   "version": "0.1.0",
   "private": true,
+  "homepage": "https://codevetter.com",
   "description": "Static Astro port of the codevetter.com landing page. Deploys to Cloudflare Pages.",
   "scripts": {
     "dev": "astro dev",
