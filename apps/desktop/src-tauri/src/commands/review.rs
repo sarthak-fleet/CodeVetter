@@ -1310,6 +1310,17 @@ pub async fn fix_findings(
                 format!("Failed to spawn {cli_cmd} (resolved to {cli_path_clone}): {e}")
             })?;
 
+        // Drain stderr on a separate thread so the child can't deadlock on a
+        // full stderr pipe while we're blocked reading stdout.
+        let stderr_handle = child.stderr.take().map(|mut s| {
+            std::thread::spawn(move || {
+                let mut buf = String::new();
+                use std::io::Read;
+                let _ = s.read_to_string(&mut buf);
+                buf
+            })
+        });
+
         let mut stdout_text = String::new();
         if let Some(stdout_pipe) = child.stdout.take() {
             use std::io::BufRead;
@@ -1332,14 +1343,8 @@ pub async fn fix_findings(
         let elapsed = start_time.elapsed().as_millis() as u64;
 
         if !status.success() {
-            let stderr_text = child
-                .stderr
-                .map(|mut s| {
-                    let mut buf = String::new();
-                    use std::io::Read;
-                    let _ = s.read_to_string(&mut buf);
-                    buf
-                })
+            let stderr_text = stderr_handle
+                .and_then(|h| h.join().ok())
                 .unwrap_or_default();
             return Err(format!("{cli_cmd} fix failed: {stderr_text}"));
         }
@@ -1385,7 +1390,11 @@ pub async fn fix_findings(
 
     // Truncate agent output for display (max 5KB)
     let agent_output = if stdout.len() > 5000 {
-        format!("{}...\n[truncated]", &stdout[..5000])
+        let mut end = 5000;
+        while end > 0 && !stdout.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...\n[truncated]", &stdout[..end])
     } else {
         stdout
     };

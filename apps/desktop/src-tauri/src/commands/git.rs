@@ -408,7 +408,6 @@ fn is_secret_or_env_path(rel: &str) -> bool {
         || name.ends_with(".pem")
         || name.ends_with(".key")
         || name.contains("id_rsa")
-        || name.contains("auth")
         // common token/cred files
         || name == ".netrc"
         || name == ".npmrc"
