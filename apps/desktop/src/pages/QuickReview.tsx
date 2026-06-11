@@ -775,6 +775,10 @@ export default function QuickReview() {
         await loadFolderData(review.repo_path);
       } else {
         setRepoPath("");
+        setBranches([]);
+        setCurrentBranch("");
+        setBaseBranch("main");
+        setSelectedBranch("");
       }
       // Past reviews don't have a stored blast report — clear the panel.
       setBlastReport(null);
@@ -922,6 +926,9 @@ export default function QuickReview() {
     setError(null);
     setBlastReport(null);
     setBlastError(null);
+    setSelectedBranch("");
+    setDiffRange("");
+    setHistoryContext(null);
     setSelectedFindingIdx(null);
     setCodeLines([]);
     setCodeFilePath("");
