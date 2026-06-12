@@ -971,12 +971,12 @@ function scoreTone(score: number): string {
   return "text-red-300";
 }
 
-const ROADMAP_RELEASE_VERSION = "1.1.43";
+const ROADMAP_RELEASE_VERSION = "1.1.44";
 
 const ROADMAP_RELEASE_ITEMS = [
   {
     label: "AI session adapters",
-    detail: "Home now shows source-health trends and recent-run drilldowns.",
+    detail: "Local archive now stores normalized adapter messages and tool calls.",
     href: "/review",
   },
   {

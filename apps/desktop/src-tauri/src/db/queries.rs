@@ -274,6 +274,41 @@ pub struct SessionAdapterRunInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMessageArchiveInput {
+    pub adapter_id: String,
+    pub agent_type: String,
+    pub source_ref: String,
+    pub source_line: Option<i64>,
+    pub message_index: i64,
+    pub role: Option<String>,
+    pub kind: String,
+    pub timestamp: Option<String>,
+    pub content_text: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub raw_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMessageArchiveRow {
+    pub id: String,
+    pub session_id: String,
+    pub adapter_id: String,
+    pub agent_type: String,
+    pub source_ref: String,
+    pub source_line: Option<i64>,
+    pub message_index: i64,
+    pub role: Option<String>,
+    pub kind: String,
+    pub timestamp: Option<String>,
+    pub content_text: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub raw_type: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityInput {
     pub agent_id: Option<String>,
     pub event_type: Option<String>,
@@ -293,6 +328,7 @@ pub struct SessionMeta {
     pub id: String,
     pub file_mtime: Option<String>,
     pub message_count: i64,
+    pub archived_message_count: i64,
 }
 
 /// Look up the stored session metadata for a given `jsonl_path`.
@@ -302,7 +338,8 @@ pub fn get_session_by_jsonl_path(
     jsonl_path: &str,
 ) -> Result<Option<SessionMeta>, rusqlite::Error> {
     conn.query_row(
-        "SELECT id, file_mtime, message_count
+        "SELECT id, file_mtime, message_count,
+                (SELECT COUNT(*) FROM session_message_archive a WHERE a.session_id = cc_sessions.id)
          FROM cc_sessions
          WHERE jsonl_path = ?1",
         params![jsonl_path],
@@ -311,6 +348,7 @@ pub fn get_session_by_jsonl_path(
                 id: row.get(0)?,
                 file_mtime: row.get(1)?,
                 message_count: row.get(2)?,
+                archived_message_count: row.get(3)?,
             })
         },
     )
@@ -603,6 +641,90 @@ pub fn reset_session_days(conn: &Connection, session_id: &str) -> Result<(), rus
         params![session_id],
     )?;
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Session message archive
+// ─────────────────────────────────────────────────────────────────
+
+pub fn replace_session_message_archive(
+    conn: &Connection,
+    session_id: &str,
+    messages: &[SessionMessageArchiveInput],
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "DELETE FROM session_message_archive WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut stmt = conn.prepare(
+        "INSERT INTO session_message_archive (
+            id, session_id, adapter_id, agent_type, source_ref, source_line,
+            message_index, role, kind, timestamp, content_text, tool_name,
+            tool_call_id, raw_type, created_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+    )?;
+    for message in messages {
+        stmt.execute(params![
+            uuid::Uuid::new_v4().to_string(),
+            session_id,
+            message.adapter_id.as_str(),
+            message.agent_type.as_str(),
+            message.source_ref.as_str(),
+            message.source_line,
+            message.message_index,
+            message.role.as_deref(),
+            message.kind.as_str(),
+            message.timestamp.as_deref(),
+            message.content_text.as_deref(),
+            message.tool_name.as_deref(),
+            message.tool_call_id.as_deref(),
+            message.raw_type.as_deref(),
+            now.as_str(),
+        ])?;
+    }
+    Ok(())
+}
+
+fn session_message_archive_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SessionMessageArchiveRow> {
+    Ok(SessionMessageArchiveRow {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        adapter_id: row.get(2)?,
+        agent_type: row.get(3)?,
+        source_ref: row.get(4)?,
+        source_line: row.get(5)?,
+        message_index: row.get(6)?,
+        role: row.get(7)?,
+        kind: row.get(8)?,
+        timestamp: row.get(9)?,
+        content_text: row.get(10)?,
+        tool_name: row.get(11)?,
+        tool_call_id: row.get(12)?,
+        raw_type: row.get(13)?,
+        created_at: row.get(14)?,
+    })
+}
+
+pub fn list_session_message_archive(
+    conn: &Connection,
+    session_id: &str,
+    limit: i64,
+) -> Result<Vec<SessionMessageArchiveRow>, rusqlite::Error> {
+    let limit = limit.clamp(1, 500);
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, adapter_id, agent_type, source_ref, source_line,
+                message_index, role, kind, timestamp, content_text, tool_name,
+                tool_call_id, raw_type, created_at
+         FROM session_message_archive
+         WHERE session_id = ?1
+         ORDER BY message_index ASC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![session_id, limit], session_message_archive_from_row)?;
+    rows.collect()
 }
 
 // ─────────────────────────────────────────────────────────────────

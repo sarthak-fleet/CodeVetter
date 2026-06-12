@@ -238,6 +238,7 @@ fn full_index_impl(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), Strin
                 if let Some(ref meta) = existing {
                     if meta.file_mtime.as_deref() == file_mtime_str.as_deref()
                         && meta.message_count > 0
+                        && meta.archived_message_count > 0
                     {
                         skipped_sessions += 1;
                         continue;
@@ -323,7 +324,9 @@ fn full_index_impl(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), Strin
                 .map_err(|e| e.to_string())?;
 
             if let Some(ref meta) = existing {
-                if meta.file_mtime.as_deref() == file_mtime_str.as_deref() && meta.message_count > 0
+                if meta.file_mtime.as_deref() == file_mtime_str.as_deref()
+                    && meta.message_count > 0
+                    && meta.archived_message_count > 0
                 {
                     skipped_sessions += 1;
                     continue;
@@ -668,9 +671,12 @@ fn upsert_adapter_summary_session(
         .map(String::from)
         .or_else(|| summary.stable_id.clone())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let adapter_id = summary.adapter_id.clone();
+    let agent_type = summary.agent_type.clone();
     let source_ref = summary.source_ref.clone();
     let message_count = summary.message_count.max(0) as u64;
     let day_counts = summary.day_counts.clone();
+    let archive_messages = summary.archive_messages.clone();
     let parse_warnings = summary.parse_warnings.clone();
 
     for warning in &summary.parse_warnings {
@@ -699,7 +705,7 @@ fn upsert_adapter_summary_session(
         &queries::SessionInput {
             id: sid.clone(),
             project_id: project_id.to_string(),
-            agent_type: Some(summary.agent_type),
+            agent_type: Some(agent_type.clone()),
             jsonl_path: Some(source_ref.clone()),
             git_branch: summary.git_branch,
             cwd: summary.cwd,
@@ -725,6 +731,27 @@ fn upsert_adapter_summary_session(
     for (day, n) in &day_counts {
         let _ = queries::bump_session_day(conn, &sid, day, *n);
     }
+
+    let archive_inputs: Vec<_> = archive_messages
+        .into_iter()
+        .enumerate()
+        .map(|(idx, message)| queries::SessionMessageArchiveInput {
+            adapter_id: adapter_id.clone(),
+            agent_type: agent_type.clone(),
+            source_ref: source_ref.clone(),
+            source_line: message.source_line,
+            message_index: idx as i64,
+            role: message.role,
+            kind: message.kind,
+            timestamp: message.timestamp,
+            content_text: message.content_text,
+            tool_name: message.tool_name,
+            tool_call_id: message.tool_call_id,
+            raw_type: message.raw_type,
+        })
+        .collect();
+    queries::replace_session_message_archive(conn, &sid, &archive_inputs)
+        .map_err(|e| e.to_string())?;
 
     Ok(IndexedAdapterSession {
         session_id: sid,
@@ -1018,6 +1045,7 @@ fn index_cursor_sessions(conn: &rusqlite::Connection) -> Result<(u64, u64, u64),
         if let Some(ref existing) = existing {
             if existing.file_mtime.as_deref() == composer_mtime.as_deref()
                 && existing.message_count > 0
+                && existing.archived_message_count > 0
             {
                 skipped_sessions += 1;
                 continue;
@@ -1278,6 +1306,13 @@ mod tests {
             )
             .expect("session day bucket");
         assert_eq!(day_count, 3);
+
+        let archived =
+            queries::list_session_message_archive(&conn, "claude-session-1", 10).expect("archive");
+        assert_eq!(archived.len(), 3);
+        assert_eq!(archived[0].adapter_id, "claude-code");
+        assert_eq!(archived[0].role.as_deref(), Some("user"));
+        assert_eq!(archived[2].kind, "compaction");
     }
 
     #[test]
@@ -1332,6 +1367,13 @@ mod tests {
             )
             .expect("session day bucket");
         assert_eq!(day_count, 2);
+
+        let archived =
+            queries::list_session_message_archive(&conn, "codex-session-1", 10).expect("archive");
+        assert_eq!(archived.len(), 2);
+        assert_eq!(archived[0].adapter_id, "codex");
+        assert_eq!(archived[0].role.as_deref(), Some("user"));
+        assert_eq!(archived[1].raw_type.as_deref(), Some("response_item"));
     }
 
     #[test]
@@ -1390,6 +1432,16 @@ mod tests {
             )
             .expect("session day bucket");
         assert_eq!(day_count, 2);
+
+        let archived =
+            queries::list_session_message_archive(&conn, "cursor-composer-1", 10).expect("archive");
+        assert_eq!(archived.len(), 2);
+        assert_eq!(archived[0].adapter_id, "cursor");
+        assert_eq!(
+            archived[0].content_text.as_deref(),
+            Some("Fix checkout test")
+        );
+        assert_eq!(archived[1].role.as_deref(), Some("assistant"));
     }
 
     #[test]

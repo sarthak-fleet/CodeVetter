@@ -175,6 +175,7 @@ fn main() {
             commands::blast_radius::analyze_blast_radius,
             // Sessions (used by Home for index stats)
             commands::sessions::list_sessions,
+            commands::sessions::list_session_message_archive,
             commands::sessions::merge_projects,
             commands::session_intelligence::get_ai_session_scorecard,
             commands::session_intelligence::list_ai_session_adapter_runs,

@@ -24,7 +24,20 @@ pub struct RawSessionAdapterSummary {
     pub compaction_count: i64,
     pub slug: Option<String>,
     pub day_counts: BTreeMap<String, i64>,
+    pub archive_messages: Vec<RawSessionArchiveMessage>,
     pub parse_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RawSessionArchiveMessage {
+    pub source_line: Option<i64>,
+    pub role: Option<String>,
+    pub kind: String,
+    pub timestamp: Option<String>,
+    pub content_text: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub raw_type: Option<String>,
 }
 
 pub trait SessionSourceAdapter {
@@ -57,6 +70,7 @@ fn empty_summary(adapter_id: &str, agent_type: &str, source_ref: &str) -> RawSes
         compaction_count: 0,
         slug: None,
         day_counts: BTreeMap::new(),
+        archive_messages: Vec::new(),
         parse_warnings: Vec::new(),
     }
 }
@@ -95,6 +109,159 @@ fn millis_to_rfc3339(value: Option<&Value>) -> Option<String> {
         .as_i64()
         .and_then(chrono::DateTime::from_timestamp_millis)
         .map(|dt| dt.to_rfc3339())
+}
+
+fn bounded_text(raw: impl Into<String>) -> Option<String> {
+    let mut value = raw.into().trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    const MAX_ARCHIVE_TEXT: usize = 12_000;
+    if value.len() > MAX_ARCHIVE_TEXT {
+        value.truncate(MAX_ARCHIVE_TEXT);
+        value.push_str("\n[truncated]");
+    }
+    Some(value)
+}
+
+fn value_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(s) => bounded_text(s),
+        Value::Null => None,
+        other => bounded_text(other.to_string()),
+    }
+}
+
+fn archive_message(
+    summary: &mut RawSessionAdapterSummary,
+    source_line: Option<i64>,
+    role: Option<String>,
+    kind: impl Into<String>,
+    timestamp: Option<String>,
+    content_text: Option<String>,
+    tool_name: Option<String>,
+    tool_call_id: Option<String>,
+    raw_type: Option<String>,
+) {
+    summary.archive_messages.push(RawSessionArchiveMessage {
+        source_line,
+        role,
+        kind: kind.into(),
+        timestamp,
+        content_text,
+        tool_name,
+        tool_call_id,
+        raw_type,
+    });
+}
+
+fn first_tool_use<'a>(blocks: &'a [Value]) -> Option<&'a Value> {
+    blocks.iter().find(|block| {
+        block
+            .get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|kind| kind == "tool_use" || kind == "tool_call")
+    })
+}
+
+fn first_tool_result<'a>(blocks: &'a [Value]) -> Option<&'a Value> {
+    blocks.iter().find(|block| {
+        block
+            .get("type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|kind| kind == "tool_result")
+    })
+}
+
+fn claude_archive_fields(
+    message: Option<&Value>,
+) -> (String, Option<String>, Option<String>, Option<String>) {
+    let Some(message) = message else {
+        return ("message".to_string(), None, None, None);
+    };
+    let Some(content) = message.get("content") else {
+        return ("message".to_string(), None, None, None);
+    };
+    if let Some(text) = content.as_str() {
+        return ("message".to_string(), bounded_text(text), None, None);
+    }
+    if let Some(blocks) = content.as_array() {
+        if let Some(tool) = first_tool_use(blocks) {
+            return (
+                "tool_call".to_string(),
+                value_text(tool.get("input")),
+                value_string(Some(tool), "name"),
+                value_string(Some(tool), "id").or_else(|| value_string(Some(tool), "tool_call_id")),
+            );
+        }
+        if let Some(result) = first_tool_result(blocks) {
+            return (
+                "tool_result".to_string(),
+                value_text(result.get("content")),
+                None,
+                value_string(Some(result), "tool_use_id"),
+            );
+        }
+        let text = blocks
+            .iter()
+            .filter_map(|block| {
+                if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                    block.get("text").and_then(|v| v.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        return ("message".to_string(), bounded_text(text), None, None);
+    }
+    ("message".to_string(), value_text(Some(content)), None, None)
+}
+
+fn codex_archive_fields(
+    payload: Option<&Value>,
+) -> (
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let role = payload.and_then(|p| value_string(Some(p), "role"));
+    let content = payload
+        .and_then(|p| {
+            p.get("content")
+                .or_else(|| p.get("text"))
+                .or_else(|| p.get("message"))
+        })
+        .and_then(|v| value_text(Some(v)));
+    let tool_name = payload.and_then(|p| {
+        value_string(Some(p), "name").or_else(|| {
+            p.get("tool_calls")
+                .or_else(|| p.get("toolCalls"))
+                .and_then(|v| v.as_array())
+                .and_then(|calls| calls.first())
+                .and_then(|call| {
+                    value_string(Some(call), "name").or_else(|| {
+                        call.get("function")
+                            .and_then(|function| value_string(Some(function), "name"))
+                    })
+                })
+        })
+    });
+    let tool_call_id = payload.and_then(|p| {
+        value_string(Some(p), "call_id")
+            .or_else(|| value_string(Some(p), "id"))
+            .or_else(|| value_string(Some(p), "tool_call_id"))
+    });
+    let kind = if tool_name.is_some() {
+        "tool_call"
+    } else if role.as_deref() == Some("tool") {
+        "tool_result"
+    } else {
+        "message"
+    };
+    (role, kind.to_string(), content, tool_name, tool_call_id)
 }
 
 impl SessionSourceAdapter for ClaudeCodeAdapter {
@@ -171,7 +338,26 @@ impl SessionSourceAdapter for ClaudeCodeAdapter {
 
             let timestamp = value_string(Some(&parsed), "timestamp");
             record_day(&mut summary, timestamp.as_deref());
-            update_timestamp(&mut summary, timestamp);
+            update_timestamp(&mut summary, timestamp.clone());
+
+            let message = parsed.get("message");
+            let role = message.and_then(|m| value_string(Some(m), "role"));
+            let (mut archive_kind, content_text, tool_name, tool_call_id) =
+                claude_archive_fields(message);
+            if msg_type == "summary" {
+                archive_kind = "compaction".to_string();
+            }
+            archive_message(
+                &mut summary,
+                Some((idx + 1) as i64),
+                role,
+                archive_kind,
+                timestamp,
+                content_text,
+                tool_name,
+                tool_call_id,
+                Some(msg_type.to_string()),
+            );
 
             let usage = parsed
                 .get("message")
@@ -303,7 +489,20 @@ impl SessionSourceAdapter for CodexAdapter {
             if msg_type == "response_item" {
                 let timestamp = value_string(Some(&parsed), "timestamp");
                 record_day(&mut summary, timestamp.as_deref());
-                update_timestamp(&mut summary, timestamp);
+                update_timestamp(&mut summary, timestamp.clone());
+                let (role, kind, content_text, tool_name, tool_call_id) =
+                    codex_archive_fields(payload);
+                archive_message(
+                    &mut summary,
+                    Some((idx + 1) as i64),
+                    role,
+                    kind,
+                    timestamp,
+                    content_text,
+                    tool_name,
+                    tool_call_id,
+                    Some(msg_type.to_string()),
+                );
                 if let Some(usage) = payload.and_then(|p| p.get("usage")) {
                     if !has_cumulative_token_count {
                         summary.total_input_tokens += usage
@@ -398,7 +597,7 @@ impl SessionSourceAdapter for CursorAdapter {
             .and_then(|v| v.as_array())
             .or_else(|| parsed.get("messages").and_then(|v| v.as_array()));
         if let Some(bubbles) = bubbles {
-            for bubble in bubbles {
+            for (idx, bubble) in bubbles.iter().enumerate() {
                 let timestamp = bubble.get("createdAt").and_then(|v| {
                     v.as_str().map(String::from).or_else(|| {
                         v.as_i64()
@@ -407,7 +606,34 @@ impl SessionSourceAdapter for CursorAdapter {
                     })
                 });
                 record_day(&mut summary, timestamp.as_deref());
-                update_timestamp(&mut summary, timestamp);
+                update_timestamp(&mut summary, timestamp.clone());
+                let bubble_type = bubble.get("type").and_then(|v| v.as_i64());
+                let role = match bubble_type {
+                    Some(1) => Some("user".to_string()),
+                    Some(2) => Some("assistant".to_string()),
+                    _ => bubble
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                };
+                let tool_name = value_string(Some(bubble), "toolName")
+                    .or_else(|| value_string(Some(bubble), "name"));
+                let kind = if tool_name.is_some() {
+                    "tool_call"
+                } else {
+                    "message"
+                };
+                archive_message(
+                    &mut summary,
+                    Some((idx + 1) as i64),
+                    role,
+                    kind,
+                    timestamp,
+                    value_text(bubble.get("text").or_else(|| bubble.get("content"))),
+                    tool_name,
+                    value_string(Some(bubble), "toolCallId"),
+                    Some("bubble".to_string()),
+                );
                 summary.message_count += 1;
             }
         } else if let Some(headers) = composer
@@ -452,6 +678,14 @@ mod tests {
         assert_eq!(summary.compaction_count, 1);
         assert_eq!(summary.slug, None);
         assert_eq!(summary.day_counts.get("2026-06-12"), Some(&3));
+        assert_eq!(summary.archive_messages.len(), 3);
+        assert_eq!(summary.archive_messages[0].role.as_deref(), Some("user"));
+        assert_eq!(summary.archive_messages[0].kind, "message");
+        assert_eq!(summary.archive_messages[2].kind, "compaction");
+        assert_eq!(
+            summary.archive_messages[2].raw_type.as_deref(),
+            Some("summary")
+        );
         assert!(summary.parse_warnings.is_empty());
     }
 
@@ -471,6 +705,16 @@ mod tests {
         assert_eq!(summary.cache_read_tokens, 100);
         assert_eq!(summary.slug, None);
         assert_eq!(summary.day_counts.get("2026-06-12"), Some(&2));
+        assert_eq!(summary.archive_messages.len(), 2);
+        assert_eq!(summary.archive_messages[0].role.as_deref(), Some("user"));
+        assert_eq!(
+            summary.archive_messages[1].role.as_deref(),
+            Some("assistant")
+        );
+        assert_eq!(
+            summary.archive_messages[1].raw_type.as_deref(),
+            Some("response_item")
+        );
         assert!(summary.parse_warnings.is_empty());
     }
 
@@ -494,6 +738,16 @@ mod tests {
             Some("2026-06-12T16:02:00+00:00")
         );
         assert_eq!(summary.day_counts.get("2026-06-12"), Some(&2));
+        assert_eq!(summary.archive_messages.len(), 2);
+        assert_eq!(summary.archive_messages[0].role.as_deref(), Some("user"));
+        assert_eq!(
+            summary.archive_messages[0].content_text.as_deref(),
+            Some("Fix checkout test")
+        );
+        assert_eq!(
+            summary.archive_messages[1].role.as_deref(),
+            Some("assistant")
+        );
         assert!(summary.parse_warnings.is_empty());
     }
 

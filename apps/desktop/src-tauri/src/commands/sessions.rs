@@ -24,6 +24,19 @@ pub async fn list_sessions(
     Ok(json!({ "sessions": sessions }))
 }
 
+/// Read the compact normalized adapter message/tool-call archive for one session.
+#[tauri::command]
+pub async fn list_session_message_archive(
+    db: State<'_, DbState>,
+    session_id: String,
+    limit: Option<i64>,
+) -> Result<Value, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let messages = queries::list_session_message_archive(&conn, &session_id, limit.unwrap_or(200))
+        .map_err(|e| e.to_string())?;
+    Ok(json!({ "messages": messages }))
+}
+
 /// Move all sessions from one or more source projects into a target project.
 /// Updates session counts on both source and target projects.
 #[tauri::command]

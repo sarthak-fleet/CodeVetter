@@ -228,14 +228,14 @@ Create a small adapter interface for local agent session sources.
 Acceptance:
 
 - Claude, Codex, and Cursor indexed sessions are normalized into a shared adapter summary contract in the scorecard API. Implemented for `SessionSourceAdapterSummary`.
-- Adapter output feeds one local SQLite evidence archive. Implemented for production and scorecard adapter run metadata through `session_adapter_runs`, Home source-health trend/drilldown views over those persisted runs, and Claude/Codex/Cursor session upserts through the raw adapter contract, while full message/tool-call archive normalization is still pending.
-- Adapter output includes source paths, stable IDs, agent name, timestamps, message totals, evidence archive name, incremental support, and parse warnings. Implemented for scorecard adapter summaries, production adapter run rows, the shared raw parser adapter contract, and Claude/Codex/Cursor production DB writes; project/cwd hints, tool calls, and command events remain on existing session/evidence records until full message archive normalization lands.
+- Adapter output feeds one local SQLite evidence archive. Implemented for production and scorecard adapter run metadata through `session_adapter_runs`, Home source-health trend/drilldown views over those persisted runs, Claude/Codex/Cursor session upserts through the raw adapter contract, and compact normalized adapter message/tool-call rows in `session_message_archive`.
+- Adapter output includes source paths, stable IDs, agent name, timestamps, message totals, evidence archive name, incremental support, and parse warnings. Implemented for scorecard adapter summaries, production adapter run rows, the shared raw parser adapter contract, Claude/Codex/Cursor production DB writes, and normalized message/tool-call archive rows with roles, kinds, source refs, source lines, timestamps, bounded content, tool names, and tool call IDs.
 - Tests cover at least one fixture per adapter. Implemented for raw Claude Code JSONL, Codex JSONL, and Cursor composer/bubble JSON fixtures.
 - Unsupported or malformed sessions degrade to parse warnings, not crashes. Implemented for missing transcript paths, zero-message rows in adapter summary tests, and malformed raw adapter input.
 
 Remaining:
 
-- Normalize full adapter message/tool-call archives into the local SQLite evidence archive. Production index passes already persist adapter roots, sample paths/session IDs, counts, incremental support, and bounded parse warnings into `session_adapter_runs`, and Home shows latest source-health status with per-adapter trends and recent-run drilldowns.
+- Add full-text search and live update events over `session_message_archive`. Production index passes already persist adapter roots, sample paths/session IDs, counts, incremental support, bounded parse warnings, and normalized message/tool-call archive rows, and Home shows latest source-health status with per-adapter trends and recent-run drilldowns.
 
 ### Phase 2: Usage And Stats Contracts
 

@@ -159,6 +159,24 @@ export interface SessionAdapterRun {
   created_at: string;
 }
 
+export interface SessionMessageArchiveRow {
+  id: string;
+  session_id: string;
+  adapter_id: string;
+  agent_type: string;
+  source_ref: string;
+  source_line?: number | null;
+  message_index: number;
+  role?: string | null;
+  kind: string;
+  timestamp?: string | null;
+  content_text?: string | null;
+  tool_name?: string | null;
+  tool_call_id?: string | null;
+  raw_type?: string | null;
+  created_at: string;
+}
+
 export interface SessionScorecard {
   schema_version: number;
   project?: string | null;
@@ -250,6 +268,10 @@ interface SessionsResponse {
 interface SessionDetailResponse {
   session: SessionRow;
   messages: MessageRow[];
+}
+
+interface SessionMessageArchiveResponse {
+  messages: SessionMessageArchiveRow[];
 }
 
 interface ReviewsResponse {
@@ -804,6 +826,20 @@ export async function listSessions(
     offset: offset ?? 0,
   });
   return resp.sessions;
+}
+
+export async function listSessionMessageArchive(
+  sessionId: string,
+  limit?: number,
+): Promise<SessionMessageArchiveRow[]> {
+  const resp = await safeInvoke<SessionMessageArchiveResponse>(
+    "list_session_message_archive",
+    {
+      sessionId,
+      limit: limit ?? 200,
+    },
+  );
+  return resp.messages;
 }
 
 export async function getSession(

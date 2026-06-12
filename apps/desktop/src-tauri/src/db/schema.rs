@@ -244,6 +244,37 @@ CREATE INDEX IF NOT EXISTS idx_session_adapter_runs_adapter_created
 CREATE INDEX IF NOT EXISTS idx_session_adapter_runs_project_created
     ON session_adapter_runs(project, created_at DESC);
 
+-- Compact normalized archive of adapter messages and tool calls. This is
+-- intentionally separate from legacy cc_messages so usage stats can stay
+-- bucketed while verification/replay features still have cited local evidence.
+CREATE TABLE IF NOT EXISTS session_message_archive (
+    id             TEXT PRIMARY KEY,
+    session_id     TEXT NOT NULL REFERENCES cc_sessions(id) ON DELETE CASCADE,
+    adapter_id     TEXT NOT NULL,
+    agent_type     TEXT NOT NULL,
+    source_ref     TEXT NOT NULL,
+    source_line    INTEGER,
+    message_index  INTEGER NOT NULL,
+    role           TEXT,
+    kind           TEXT NOT NULL,
+    timestamp      TEXT,
+    content_text   TEXT,
+    tool_name      TEXT,
+    tool_call_id   TEXT,
+    raw_type       TEXT,
+    created_at     TEXT NOT NULL,
+    UNIQUE(session_id, source_ref, message_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_message_archive_session
+    ON session_message_archive(session_id, message_index);
+
+CREATE INDEX IF NOT EXISTS idx_session_message_archive_adapter_created
+    ON session_message_archive(adapter_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_session_message_archive_kind
+    ON session_message_archive(kind);
+
 -- Per-session per-day message counts. Replaces per-message rows: the UI
 -- only needs token totals attributed across days, which only requires the
 -- count of messages per (session, day). Cuts the message-row footprint
