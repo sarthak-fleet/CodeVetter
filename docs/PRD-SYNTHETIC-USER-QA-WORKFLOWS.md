@@ -60,7 +60,7 @@ Acceptance:
 
 - A failed step can be linked to files or hunks when there is clear evidence.
 - The review prompt can include a compact QA summary. Implemented for current Review QA run history through `qa_evidence` in CLI review input/result metadata; persisted SQLite QA run records are preferred when available.
-- Re-run after fix uses the same flow definition when possible. Partially implemented through named local workflows, persisted recent run history, and a post-fix comparison model that detects matching before/after runs; automatic execution of the rerun is still pending.
+- Re-run after fix uses the same flow definition when possible. Implemented through named local workflows, persisted recent run history, automatic same-flow post-fix reruns after successful fix runs, a same-flow manual retry action, and a post-fix comparison model that detects matching before/after runs.
 
 ### Repo Unpacked Integration
 
@@ -101,7 +101,7 @@ Let a QA failure feed the existing fix and re-review workflow.
 Acceptance:
 
 - A failed QA run can generate a review packet. Implemented through fix packets, procedure events, and QA failure findings.
-- The same flow can be rerun after a fix. Partially implemented manually through saved workflows and persisted recent run context; the Review UI now prompts for a matching rerun when a fix exists without post-fix QA evidence.
+- The same flow can be rerun after a fix. Implemented through saved workflows, persisted recent run context, automatic post-fix reruns when a prior QA run exists, and a manual same-flow retry action when a fix exists without post-fix QA evidence.
 - Results distinguish "still broken" from "fixed". Implemented for stored before/after runs through `buildQaPostFixComparison`, Review UI comparison cards, and copied reviewer proof.
 
 ### Phase 3: Flow Library

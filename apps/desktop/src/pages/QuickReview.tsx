@@ -353,6 +353,36 @@ interface QaRunHistoryEntry {
   screenshotPath: string | null;
   artifacts?: string[];
   consoleErrors: number;
+  externalCommand?: string;
+  repoSpecPath?: string;
+  repoTraceMode?: QaRepoTraceMode;
+  storageStatePath?: string;
+  allowRemoteTarget?: boolean;
+}
+
+function qaRequestFromHistory(
+  run: Pick<QaRunHistoryEntry, "baseUrl" | "loopId" | "runnerType" | "goal"> &
+    Partial<QaRunHistoryEntry>,
+  fallback: QaPreset,
+): QaPreset {
+  return {
+    baseUrl: run.baseUrl || fallback.baseUrl,
+    loopId: run.loopId || fallback.loopId,
+    runnerType:
+      run.runnerType === "external_skill" ||
+      run.runnerType === "repo_playwright" ||
+      run.runnerType === "playwright_builtin"
+        ? run.runnerType
+        : fallback.runnerType,
+    goal: run.goal || fallback.goal,
+    externalCommand: run.externalCommand ?? fallback.externalCommand,
+    repoSpecPath: run.repoSpecPath ?? fallback.repoSpecPath,
+    repoTraceMode: run.repoTraceMode ?? fallback.repoTraceMode,
+    authMode: run.authMode ?? fallback.authMode,
+    storageStatePath: run.storageStatePath ?? fallback.storageStatePath,
+    targetRoute: run.route ?? fallback.targetRoute,
+    allowRemoteTarget: run.allowRemoteTarget ?? fallback.allowRemoteTarget,
+  };
 }
 
 function firstNonEmpty(values: Array<string | null | undefined>): string | undefined {
@@ -937,6 +967,7 @@ export default function QuickReview() {
   const [qaPresetLoaded, setQaPresetLoaded] = useState(false);
   const [qaRunHistory, setQaRunHistory] = useState<QaRunHistoryEntry[]>([]);
   const [qaRunning, setQaRunning] = useState(false);
+  const [postFixQaRunning, setPostFixQaRunning] = useState(false);
   const [qaLastRun, setQaLastRun] = useState<SyntheticQaRunResult | null>(null);
   const [qaError, setQaError] = useState<string | null>(null);
   const [qaArtifactPreview, setQaArtifactPreview] = useState<{
@@ -1405,7 +1436,7 @@ export default function QuickReview() {
         : null,
       isReviewing,
       qa: {
-        running: qaRunning,
+        running: qaRunning || postFixQaRunning,
         latest: qaRunHistory[0] ?? null,
       },
       evidenceCounts,
@@ -1432,6 +1463,7 @@ export default function QuickReview() {
     fixResult,
     isFixing,
     isReviewing,
+    postFixQaRunning,
     qaRunHistory,
     qaRunning,
     result,
@@ -2140,51 +2172,66 @@ export default function QuickReview() {
     }
   }, [qaRepoSpecPath, repoPath]);
 
-  const handleRunSyntheticQa = useCallback(async () => {
-    if (!isTauriAvailable()) {
-      setQaError("Synthetic QA requires the CodeVetter desktop app (Tauri).");
-      return;
-    }
-    setQaRunning(true);
-    setQaError(null);
-    try {
-      const run = await runSyntheticQa(qaBaseUrl, qaLoopId, {
-        runnerType: qaRunnerType,
-        goal: qaGoal,
-        externalCommand: qaRunnerType === "external_skill" ? qaExternalCommand : undefined,
-        repoPath,
-        specPath: qaRunnerType === "repo_playwright" ? qaRepoSpecPath : undefined,
-        repoTraceMode: qaRunnerType === "repo_playwright" ? qaRepoTraceMode : undefined,
-        authMode: qaAuthMode,
-        storageStatePath: qaAuthMode === "storage_state" ? qaStorageStatePath : undefined,
-        targetRoute: qaTargetRoute,
-        allowRemoteTarget: qaAllowRemoteTarget,
+  const runSyntheticQaFlow = useCallback(
+    async (
+      request: QaPreset,
+      options?: { repoPathOverride?: string | null },
+    ): Promise<QaRunHistoryEntry> => {
+      if (!isTauriAvailable()) {
+        throw new Error("Synthetic QA requires the CodeVetter desktop app (Tauri).");
+      }
+      const runRepoPath = options?.repoPathOverride || repoPath;
+      const run = await runSyntheticQa(request.baseUrl, request.loopId, {
+        runnerType: request.runnerType,
+        goal: request.goal,
+        externalCommand:
+          request.runnerType === "external_skill" ? request.externalCommand : undefined,
+        repoPath: runRepoPath,
+        specPath: request.runnerType === "repo_playwright" ? request.repoSpecPath : undefined,
+        repoTraceMode:
+          request.runnerType === "repo_playwright" ? request.repoTraceMode : undefined,
+        authMode: request.authMode,
+        storageStatePath:
+          request.authMode === "storage_state" ? request.storageStatePath : undefined,
+        targetRoute: request.targetRoute,
+        allowRemoteTarget: request.allowRemoteTarget,
       });
       setQaLastRun(run);
+      const configFields = {
+        externalCommand: request.externalCommand,
+        repoSpecPath: request.repoSpecPath,
+        repoTraceMode: request.repoTraceMode,
+        storageStatePath: request.storageStatePath,
+        allowRemoteTarget: request.allowRemoteTarget,
+      };
       let entry: QaRunHistoryEntry = {
         createdAt: new Date().toISOString(),
         loopId: run.loop_id,
-        runnerType: run.runner_type ?? qaRunnerType,
-        baseUrl: qaBaseUrl,
-        goal: run.goal || qaGoal,
-        route: run.route || qaTargetRoute,
-        authMode: qaAuthMode,
+        runnerType: run.runner_type ?? request.runnerType,
+        baseUrl: request.baseUrl,
+        goal: run.goal || request.goal,
+        route: run.route || request.targetRoute,
+        authMode: request.authMode,
         pass: run.pass,
         durationMs: run.duration_ms,
         notes: run.notes,
         screenshotPath: run.screenshot_path,
         artifacts: run.artifacts ?? [],
         consoleErrors: run.trace?.console_errors?.length ?? 0,
+        ...configFields,
       };
       if (reviewId) {
         try {
           const storedRun = await recordSyntheticQaRun({
             reviewId,
-            repoPath,
-            baseUrl: qaBaseUrl,
+            repoPath: runRepoPath,
+            baseUrl: request.baseUrl,
             run,
           });
-          entry = storedSyntheticQaRunToHistory(storedRun);
+          entry = {
+            ...storedSyntheticQaRunToHistory(storedRun),
+            ...configFields,
+          };
         } catch {
           // Preference-backed history below remains the fallback if DB persistence fails.
         }
@@ -2202,28 +2249,51 @@ export default function QuickReview() {
       if (!run.pass) {
         trackCoreAction("review_run");
       }
+      return entry;
+    },
+    [activeProcedureSteps, recordProcedureExecutionEvents, reviewId, repoPath],
+  );
+
+  const handleRunSyntheticQa = useCallback(async () => {
+    setQaRunning(true);
+    setQaError(null);
+    try {
+      await runSyntheticQaFlow(currentQaWorkflow(qaActiveWorkflowId || "manual"));
     } catch (err) {
       setQaError(err instanceof Error ? err.message : String(err));
       setQaLastRun(null);
     } finally {
       setQaRunning(false);
     }
+  }, [currentQaWorkflow, qaActiveWorkflowId, runSyntheticQaFlow]);
+
+  const handleRunPostFixQa = useCallback(async () => {
+    if (!qaPostFixComparison?.before) return;
+    setPostFixQaRunning(true);
+    setQaError(null);
+    try {
+      await runSyntheticQaFlow(
+        qaRequestFromHistory(
+          qaPostFixComparison.before,
+          currentQaWorkflow(qaActiveWorkflowId || "manual"),
+        ),
+        {
+          repoPathOverride: fixResult?.worktree_path,
+        },
+      );
+    } catch (err) {
+      setQaError(
+        `Post-fix QA rerun failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setPostFixQaRunning(false);
+    }
   }, [
-    qaAuthMode,
-    qaAllowRemoteTarget,
-    activeProcedureSteps,
-    qaBaseUrl,
-    qaExternalCommand,
-    qaGoal,
-    qaLoopId,
-    qaRepoSpecPath,
-    qaRepoTraceMode,
-    qaRunnerType,
-    qaStorageStatePath,
-    qaTargetRoute,
-    recordProcedureExecutionEvents,
-    reviewId,
-    repoPath,
+    currentQaWorkflow,
+    fixResult,
+    qaActiveWorkflowId,
+    qaPostFixComparison,
+    runSyntheticQaFlow,
   ]);
 
   const handleOpenQaArtifact = useCallback(async (artifact: string) => {
@@ -2473,6 +2543,8 @@ export default function QuickReview() {
 
   const handleFixSelected = useCallback(async () => {
     if (!repoPath || !result || selectedFindings.size === 0) return;
+    const preFixQaRun = qaRunHistory[0] ?? null;
+    const currentQaRequest = currentQaWorkflow(qaActiveWorkflowId || "manual");
     setIsFixing("selected");
     setFixResult(null);
     setFixCompletedAt(null);
@@ -2500,8 +2572,9 @@ export default function QuickReview() {
 
     try {
       const res = await fixFindings(repoPath, fixPacket.findings, result.agent);
+      const completedAt = new Date().toISOString();
       setFixResult(res);
-      setFixCompletedAt(new Date().toISOString());
+      setFixCompletedAt(completedAt);
       recordProcedureExecutionEvents(
         procedureEventsForFixResult(activeProcedureSteps, res),
         {
@@ -2511,6 +2584,21 @@ export default function QuickReview() {
           usingWorktree: res.using_worktree ?? null,
         },
       );
+      if (preFixQaRun) {
+        setPostFixQaRunning(true);
+        setQaError(null);
+        try {
+          await runSyntheticQaFlow(qaRequestFromHistory(preFixQaRun, currentQaRequest), {
+            repoPathOverride: res.worktree_path,
+          });
+        } catch (qaErr) {
+          setQaError(
+            `Post-fix QA rerun failed: ${qaErr instanceof Error ? qaErr.message : String(qaErr)}`,
+          );
+        } finally {
+          setPostFixQaRunning(false);
+        }
+      }
     } catch (e) {
       setError(`Fix failed: ${String(e)}`);
     } finally {
@@ -2519,10 +2607,14 @@ export default function QuickReview() {
     }
   }, [
     activeProcedureSteps,
+    currentQaWorkflow,
     fixPacket.findings,
+    qaActiveWorkflowId,
+    qaRunHistory,
     repoPath,
     recordProcedureExecutionEvents,
     result,
+    runSyntheticQaFlow,
     selectedFindings.size,
   ]);
 
@@ -3632,6 +3724,12 @@ export default function QuickReview() {
                         <p className="mt-1 text-slate-400">
                           {qaPostFixComparison.summary}
                         </p>
+                        {postFixQaRunning && (
+                          <div className="mt-2 flex items-center gap-1.5 text-[10px] text-cyan-300">
+                            <Loader2 size={12} className="animate-spin" />
+                            Running the same QA flow after the fix…
+                          </div>
+                        )}
                         <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
                           <div className="rounded border border-[var(--cv-line)] bg-[#050505] px-2 py-1.5">
                             <div className="font-mono uppercase text-slate-500">Before</div>
@@ -3658,6 +3756,23 @@ export default function QuickReview() {
                             )}
                           </div>
                         </div>
+                        {qaPostFixComparison.status === "needs_rerun" && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="mt-2 h-7 px-2 text-[10px] text-yellow-200"
+                            disabled={postFixQaRunning}
+                            onClick={() => void handleRunPostFixQa()}
+                          >
+                            {postFixQaRunning ? (
+                              <Loader2 size={12} className="animate-spin" />
+                            ) : (
+                              <RefreshCw size={12} />
+                            )}
+                            Run same flow now
+                          </Button>
+                        )}
                       </div>
                     )}
                   </div>
