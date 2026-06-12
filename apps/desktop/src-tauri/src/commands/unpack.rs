@@ -16,7 +16,7 @@ use crate::DbState;
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -179,6 +179,15 @@ impl Default for RepoGraph {
 
 fn default_repo_graph() -> RepoGraph {
     RepoGraph::default()
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RepoGraphImportResult {
+    pub graph: RepoGraph,
+    pub source_kind: String,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -609,6 +618,182 @@ pub async fn export_repo_unpack_report(
     };
 
     Ok(json!({ "content": content, "format": format }))
+}
+
+#[tauri::command]
+pub async fn import_repo_graph_json(content: String) -> Result<RepoGraphImportResult, String> {
+    let value: Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Graph import must be valid JSON: {e}"))?;
+    import_repo_graph_from_value(&value)
+}
+
+fn import_repo_graph_from_value(value: &Value) -> Result<RepoGraphImportResult, String> {
+    let (candidate, source_kind) = if let Some(graph) = value.get("repo_graph") {
+        (graph, "repo_graph")
+    } else if let Some(graph) = value.get("graph") {
+        (graph, "graph")
+    } else if let Some(graph) = value.pointer("/data/graph") {
+        (graph, "data.graph")
+    } else {
+        (value, "root")
+    };
+
+    let mut warnings = Vec::new();
+    let graph = match serde_json::from_value::<RepoGraph>(candidate.clone()) {
+        Ok(graph) => graph,
+        Err(_) => import_loose_repo_graph(candidate, &mut warnings)?,
+    };
+    validate_imported_repo_graph(&graph)?;
+
+    let node_count = graph.nodes.len();
+    let edge_count = graph.edges.len();
+    Ok(RepoGraphImportResult {
+        graph,
+        source_kind: source_kind.to_string(),
+        node_count,
+        edge_count,
+        warnings,
+    })
+}
+
+fn import_loose_repo_graph(value: &Value, warnings: &mut Vec<String>) -> Result<RepoGraph, String> {
+    let nodes_value = value
+        .get("nodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Graph import needs a nodes array.".to_string())?;
+    let edges_value = value
+        .get("edges")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Graph import needs an edges array.".to_string())?;
+
+    const MAX_IMPORTED_NODES: usize = 1_000;
+    const MAX_IMPORTED_EDGES: usize = 1_500;
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+
+    for (idx, node) in nodes_value.iter().take(MAX_IMPORTED_NODES).enumerate() {
+        let id = string_field(node, &["id", "key"])
+            .or_else(|| string_field(node, &["label", "name"]).map(|s| graph_id("imported", &s)))
+            .ok_or_else(|| format!("Node {idx} is missing id, label, or name."))?;
+        let kind = string_field(node, &["kind", "type", "category"])
+            .unwrap_or_else(|| "imported".to_string());
+        let label = string_field(node, &["label", "name", "title"]).unwrap_or_else(|| id.clone());
+        let path = string_field(node, &["path", "file_path", "source_path"]);
+        let detail = string_field(node, &["detail", "description", "summary"]);
+        let mut sources = string_array_field(node, "sources");
+        if sources.is_empty() {
+            if let Some(path) = path.as_ref() {
+                sources.push(path.clone());
+            }
+        }
+        nodes.push(RepoGraphNode {
+            id,
+            kind,
+            label,
+            path,
+            detail,
+            sources,
+        });
+    }
+
+    for (idx, edge) in edges_value.iter().take(MAX_IMPORTED_EDGES).enumerate() {
+        let from = string_field(edge, &["from", "source", "source_id", "start"])
+            .ok_or_else(|| format!("Edge {idx} is missing from/source."))?;
+        let to = string_field(edge, &["to", "target", "target_id", "end"])
+            .ok_or_else(|| format!("Edge {idx} is missing to/target."))?;
+        let kind = string_field(edge, &["kind", "type", "label"])
+            .unwrap_or_else(|| "relates_to".to_string());
+        let evidence = string_field(edge, &["evidence", "detail", "description"])
+            .unwrap_or_else(|| "imported graph edge".to_string());
+        edges.push(RepoGraphEdge {
+            from,
+            to,
+            kind,
+            evidence,
+            sources: string_array_field(edge, "sources"),
+        });
+    }
+
+    let truncated =
+        nodes_value.len() > MAX_IMPORTED_NODES || edges_value.len() > MAX_IMPORTED_EDGES;
+    if nodes_value.len() > MAX_IMPORTED_NODES {
+        warnings.push(format!(
+            "Imported first {MAX_IMPORTED_NODES} of {} nodes.",
+            nodes_value.len()
+        ));
+    }
+    if edges_value.len() > MAX_IMPORTED_EDGES {
+        warnings.push(format!(
+            "Imported first {MAX_IMPORTED_EDGES} of {} edges.",
+            edges_value.len()
+        ));
+    }
+    warnings
+        .push("Loose graph JSON was normalized into CodeVetter's repo_graph schema.".to_string());
+
+    Ok(RepoGraph {
+        schema_version: 1,
+        nodes,
+        edges,
+        truncated,
+    })
+}
+
+fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn string_array_field(value: &Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn validate_imported_repo_graph(graph: &RepoGraph) -> Result<(), String> {
+    if graph.nodes.is_empty() {
+        return Err("Graph import did not contain any nodes.".to_string());
+    }
+    let mut node_ids = HashSet::new();
+    for node in &graph.nodes {
+        if node.id.trim().is_empty() {
+            return Err("Graph import contains a node with an empty id.".to_string());
+        }
+        if node.kind.trim().is_empty() {
+            return Err(format!("Graph node {} has an empty kind.", node.id));
+        }
+        if !node_ids.insert(node.id.as_str()) {
+            return Err(format!(
+                "Graph import contains duplicate node id {}.",
+                node.id
+            ));
+        }
+    }
+    for edge in &graph.edges {
+        if edge.from.trim().is_empty() || edge.to.trim().is_empty() {
+            return Err("Graph import contains an edge with an empty endpoint.".to_string());
+        }
+        if !node_ids.contains(edge.from.as_str()) || !node_ids.contains(edge.to.as_str()) {
+            return Err(format!(
+                "Graph edge {} -> {} references a missing node.",
+                edge.from, edge.to
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ─── Inventory builder (deterministic) ──────────────────────────────────────
@@ -3593,6 +3778,78 @@ CREATE TABLE IF NOT EXISTS local_reviews (
         assert!(sidecar.contains("src/review.ts#L1"));
         assert!(sidecar.contains("file:src-review-ts"));
         assert!(sidecar.contains("decided_by"));
+    }
+
+    #[test]
+    fn imports_codevetter_repo_graph_from_wrapper_json() {
+        let raw = serde_json::json!({
+            "repo_graph": {
+                "schema_version": 1,
+                "nodes": [
+                    {
+                        "id": "file:src-review-ts",
+                        "kind": "file",
+                        "label": "src/review.ts",
+                        "path": "src/review.ts",
+                        "detail": "changed file",
+                        "sources": ["src/review.ts"]
+                    }
+                ],
+                "edges": [],
+                "truncated": false
+            }
+        });
+
+        let result = import_repo_graph_from_value(&raw).expect("imported graph");
+
+        assert_eq!(result.source_kind, "repo_graph");
+        assert_eq!(result.node_count, 1);
+        assert_eq!(result.edge_count, 0);
+        assert!(result.warnings.is_empty());
+        assert_eq!(result.graph.nodes[0].label, "src/review.ts");
+    }
+
+    #[test]
+    fn imports_loose_graph_json_with_source_target_edges() {
+        let raw = serde_json::json!({
+            "graph": {
+                "nodes": [
+                    {
+                        "id": "a",
+                        "type": "file",
+                        "name": "src/a.ts",
+                        "file_path": "src/a.ts"
+                    },
+                    {
+                        "id": "b",
+                        "type": "test",
+                        "name": "tests/a.test.ts"
+                    }
+                ],
+                "edges": [
+                    {
+                        "source": "a",
+                        "target": "b",
+                        "type": "tests",
+                        "description": "test covers file"
+                    }
+                ]
+            }
+        });
+
+        let result = import_repo_graph_from_value(&raw).expect("loose graph");
+
+        assert_eq!(result.source_kind, "graph");
+        assert_eq!(result.node_count, 2);
+        assert_eq!(result.edge_count, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("normalized")));
+        assert_eq!(result.graph.nodes[0].kind, "file");
+        assert_eq!(result.graph.nodes[0].path.as_deref(), Some("src/a.ts"));
+        assert_eq!(result.graph.edges[0].kind, "tests");
+        assert_eq!(result.graph.edges[0].evidence, "test covers file");
     }
 
     #[test]

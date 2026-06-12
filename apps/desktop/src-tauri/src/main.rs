@@ -232,6 +232,7 @@ fn main() {
             commands::unpack::get_repo_unpack_report,
             commands::unpack::delete_repo_unpack_report,
             commands::unpack::export_repo_unpack_report,
+            commands::unpack::import_repo_graph_json,
             // Synthetic user QA
             commands::synthetic_qa::run_synthetic_qa,
             commands::synthetic_qa::discover_playwright_specs,

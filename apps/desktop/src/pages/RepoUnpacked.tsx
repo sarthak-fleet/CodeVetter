@@ -29,7 +29,7 @@ import {
   Workflow,
   Wrench,
 } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { type ChangeEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -56,6 +56,7 @@ import {
   type GenerateUnpackResult,
   getPreference,
   getRepoUnpackReport,
+  importRepoGraphJson,
   isTauriAvailable,
   listRepoUnpackReports,
   openInApp,
@@ -92,6 +93,13 @@ interface ActiveReportState {
   agentUsed?: string | null;
   modelUsed?: string | null;
   createdAt?: string;
+}
+
+interface ImportedGraphState {
+  fileName: string;
+  sourceKind: string;
+  graph: UnpackRepoGraph;
+  warnings: string[];
 }
 
 const SECTION_META: Array<{
@@ -232,6 +240,9 @@ export default function RepoUnpacked() {
   const [timelineRepoName, setTimelineRepoName] = useState<string>("");
   const [timelineRows, setTimelineRows] = useState<UnpackReportSummary[]>([]);
   const [timelineLoading, setTimelineLoading] = useState(false);
+  const [importedGraph, setImportedGraph] = useState<ImportedGraphState | null>(null);
+  const [graphImporting, setGraphImporting] = useState(false);
+  const graphImportInputRef = useRef<HTMLInputElement | null>(null);
 
   // Restore last repo path
   useEffect(() => {
@@ -321,6 +332,7 @@ export default function RepoUnpacked() {
     const picked = await pickDirectory("Select a repository to unpack");
     if (picked) {
       setRepoPath(picked);
+      setImportedGraph(null);
       void persistRepoPath(picked);
     }
   }, [persistRepoPath]);
@@ -337,6 +349,7 @@ export default function RepoUnpacked() {
     setError(null);
     setPhase("scanning");
     setActive(null);
+    setImportedGraph(null);
     try {
       const inv = await scanRepoInventory(repoPath);
       setActive({ inventory: inv });
@@ -359,6 +372,7 @@ export default function RepoUnpacked() {
     }
     setError(null);
     setActive(null);
+    setImportedGraph(null);
     setPhase("scanning");
     try {
       // Show inventory eagerly — gives the user something to read while the
@@ -417,6 +431,7 @@ export default function RepoUnpacked() {
         modelUsed: row.model_used,
         createdAt: row.created_at,
       });
+      setImportedGraph(null);
       setRepoPath(row.repo_path);
       setPhase("ready");
     } catch (err: unknown) {
@@ -496,6 +511,48 @@ export default function RepoUnpacked() {
     }
   }, [active]);
 
+  const handleImportGraphClick = useCallback(() => {
+    if (!active?.inventory) {
+      setError("Scan or load a repo before importing graph JSON.");
+      return;
+    }
+    graphImportInputRef.current?.click();
+  }, [active]);
+
+  const handleImportGraphFile = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (!file) return;
+      if (!active?.inventory) {
+        setError("Scan or load a repo before importing graph JSON.");
+        return;
+      }
+      if (!isTauriAvailable()) {
+        setError("Graph import requires the desktop app.");
+        return;
+      }
+
+      setError(null);
+      setGraphImporting(true);
+      try {
+        const result = await importRepoGraphJson(await file.text());
+        setImportedGraph({
+          fileName: file.name,
+          sourceKind: result.source_kind,
+          graph: result.graph,
+          warnings: result.warnings,
+        });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+      } finally {
+        setGraphImporting(false);
+      }
+    },
+    [active],
+  );
+
   const isBusy = phase === "scanning" || phase === "generating";
 
   return (
@@ -528,6 +585,7 @@ export default function RepoUnpacked() {
           repoPath={repoPath}
           setRepoPath={(p) => {
             setRepoPath(p);
+            setImportedGraph(null);
             void persistRepoPath(p);
           }}
           agent={agent}
@@ -536,6 +594,14 @@ export default function RepoUnpacked() {
           onScan={handleScanOnly}
           onGenerate={handleGenerate}
           phase={phase}
+        />
+
+        <input
+          ref={graphImportInputRef}
+          type="file"
+          accept=".json,application/json"
+          className="hidden"
+          onChange={handleImportGraphFile}
         />
 
         {error && (
@@ -568,6 +634,9 @@ export default function RepoUnpacked() {
             model={active.modelUsed ?? null}
             runtimeMs={active.runtimeMs}
             createdAt={active.createdAt}
+            importedGraph={importedGraph}
+            onImportGraph={handleImportGraphClick}
+            graphImporting={graphImporting}
           />
         )}
 
@@ -1172,9 +1241,17 @@ function QaReadinessPanel({
 function RepoMemoryGraphPanel({
   graph,
   repoPath,
+  title = "Repo memory graph",
+  description = "Local graph artifact over files, package scripts, routes, commands, tables, tests, and decision markers. Edges are navigation leads, not proof by themselves.",
+  meta,
+  warnings = [],
 }: {
   graph?: UnpackRepoGraph | null;
   repoPath: string;
+  title?: string;
+  description?: string;
+  meta?: string;
+  warnings?: string[];
 }) {
   if (!graph || graph.nodes.length === 0) return null;
   const nodeKinds = graph.nodes.reduce<Record<string, number>>((acc, node) => {
@@ -1193,13 +1270,16 @@ function RepoMemoryGraphPanel({
         <div>
           <div className="flex items-center gap-2 text-sm font-medium text-[var(--text-primary)]">
             <Network size={14} className="text-[var(--cv-accent)]" />
-            Repo memory graph
+            {title}
           </div>
           <p className="mt-1 max-w-3xl text-xs leading-relaxed text-[var(--text-secondary)]">
-            Local graph artifact over files, package scripts, routes, commands,
-            tables, tests, and decision markers. Edges are navigation leads,
-            not proof by themselves.
+            {description}
           </p>
+          {meta && (
+            <p className="mt-1 font-mono text-[10px] text-[var(--text-muted)]">
+              {meta}
+            </p>
+          )}
         </div>
         <Badge
           variant="outline"
@@ -1209,6 +1289,14 @@ function RepoMemoryGraphPanel({
           {graph.edges.length} edges{graph.truncated ? " · truncated" : ""}
         </Badge>
       </div>
+
+      {warnings.length > 0 && (
+        <div className="mt-3 rounded border border-yellow-500/25 bg-yellow-500/10 px-3 py-2 text-[11px] text-yellow-100">
+          {warnings.slice(0, 3).map((warning) => (
+            <div key={warning}>{warning}</div>
+          ))}
+        </div>
+      )}
 
       {topKinds.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5">
@@ -1404,12 +1492,18 @@ function InventorySummary({
   model,
   runtimeMs,
   createdAt,
+  importedGraph,
+  onImportGraph,
+  graphImporting,
 }: {
   inventory: UnpackRepoInventory;
   agent?: string | null;
   model?: string | null;
   runtimeMs?: number;
   createdAt?: string;
+  importedGraph?: ImportedGraphState | null;
+  onImportGraph: () => void;
+  graphImporting: boolean;
 }) {
   const stat = (label: string, value: ReactNode) => (
     <div className="flex flex-col">
@@ -1423,15 +1517,32 @@ function InventorySummary({
   return (
     <Card className="mt-4 border-[var(--cv-line)] bg-[var(--bg-surface)]">
       <CardHeader className="pb-3">
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Layers size={16} className="text-[var(--cv-accent)]" />
-          {inventory.repo_name}
-          {inventory.commit_sha && (
-            <span className="ml-2 font-mono text-[11px] text-[var(--text-muted)]">
-              {inventory.commit_sha.slice(0, 8)}
-            </span>
-          )}
-        </CardTitle>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Layers size={16} className="text-[var(--cv-accent)]" />
+            {inventory.repo_name}
+            {inventory.commit_sha && (
+              <span className="ml-2 font-mono text-[11px] text-[var(--text-muted)]">
+                {inventory.commit_sha.slice(0, 8)}
+              </span>
+            )}
+          </CardTitle>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onImportGraph}
+            disabled={graphImporting}
+            className="shrink-0"
+          >
+            {graphImporting ? (
+              <Loader2 size={14} className="mr-1.5 animate-spin" />
+            ) : (
+              <FilePlus2 size={14} className="mr-1.5" />
+            )}
+            Import graph
+          </Button>
+        </div>
         <CardDescription className="break-all text-xs">
           {inventory.repo_path}
         </CardDescription>
@@ -1487,6 +1598,17 @@ function InventorySummary({
           graph={inventory.repo_graph}
           repoPath={inventory.repo_path}
         />
+
+        {importedGraph && (
+          <RepoMemoryGraphPanel
+            graph={importedGraph.graph}
+            repoPath={inventory.repo_path}
+            title="Imported memory graph"
+            description="Explicitly imported graph JSON for comparison or agent handoff. This preview does not mutate the saved Repo Unpacked report."
+            meta={`${importedGraph.fileName} · ${importedGraph.sourceKind}`}
+            warnings={importedGraph.warnings}
+          />
+        )}
 
         <CodebaseHistoryBriefPanel
           historyBrief={inventory.history_brief}

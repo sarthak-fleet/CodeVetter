@@ -180,7 +180,7 @@ Acceptance:
 
 - CodeVetter can export findings as Hunk-style agent-context notes or another documented sidecar format. Implemented through Repo Unpacked `agent_context_markdown` sidecar export with repo graph and history context plus Review's selected-finding "Copy note" action, which includes file/line, evidence status, local history context, focused graph nodes/edges, and next verification actions.
 - CodeVetter can export its local graph as JSON for Graphify comparison. Implemented through Repo Unpacked `repo_graph_json` export.
-- CodeVetter can import a graph JSON/report only through an explicit user action.
+- CodeVetter can import a graph JSON/report only through an explicit user action. Implemented in Repo Unpacked through an explicit `Import graph` file action that validates CodeVetter `repo_graph` JSON or loose graph-shaped JSON, normalizes it into the local graph schema, and renders it as an imported preview without mutating the saved report.
 - Missing optional CLIs produce clear non-fatal UI errors.
 - No production dependency is added unless a prior spike proves the value and tradeoff. Implemented for the export slice; no Graphify/Hunk runtime dependency was added.
 

@@ -1551,6 +1551,14 @@ export interface UnpackRepoGraph {
   truncated: boolean;
 }
 
+export interface ImportRepoGraphResult {
+  graph: UnpackRepoGraph;
+  source_kind: string;
+  node_count: number;
+  edge_count: number;
+  warnings: string[];
+}
+
 export interface UnpackRepoHistoryCommit {
   sha: string;
   date?: string | null;
@@ -1706,6 +1714,12 @@ export async function exportRepoUnpackReport(
   format: "markdown" | "html" | "repo_graph_json" | "agent_context_markdown",
 ): Promise<{ content: string; format: string }> {
   return safeInvoke("export_repo_unpack_report", { id, format });
+}
+
+export async function importRepoGraphJson(
+  content: string,
+): Promise<ImportRepoGraphResult> {
+  return safeInvoke("import_repo_graph_json", { content });
 }
 
 // ─── Synthetic user QA ─────────────────────────────────────────────────────
