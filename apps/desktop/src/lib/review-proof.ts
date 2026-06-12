@@ -81,6 +81,7 @@ export interface VerificationTimelineAnchor {
   label: string;
   source: string;
   status?: "passed" | "failed" | "stale" | "unknown";
+  contextExcerpt?: string[];
   sourcePath?: string | null;
   sourceLine?: number | null;
   eventId?: string | null;
@@ -330,6 +331,7 @@ function buildCommandTimelineAnchors(
       label: signal.command,
       source: signal.source,
       status: signal.status ?? "unknown",
+      contextExcerpt: signal.context_excerpt?.slice(0, 2) ?? [],
       sourcePath,
       sourceLine: signal.source_line ?? null,
       eventId: signal.event_id ?? null,
@@ -1056,6 +1058,9 @@ export function buildReviewerProofMarkdown(input: ReviewerProofInput): string {
         lines.push(
           `  - ${anchor.status ?? "unknown"} command: ${anchor.label}${loc.length > 0 ? ` (${loc.join(" · ")})` : ""}`,
         );
+        anchor.contextExcerpt?.slice(0, 2).forEach((excerpt) => {
+          lines.push(`    - transcript: ${excerpt}`);
+        });
       });
     });
   }

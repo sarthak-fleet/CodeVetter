@@ -83,6 +83,10 @@ describe("buildAgentFixPacket", () => {
             artifact: "artifacts/test.log",
             jumpKind: "command_source",
             jumpPath: "/tmp/session.jsonl",
+            contextExcerpt: [
+              "assistant: ran npm run test after wiring the timeline packet",
+              "tool: assertion failed in checkout replay",
+            ],
           },
         ],
       },
@@ -103,6 +107,7 @@ describe("buildAgentFixPacket", () => {
     assert.match(markdown, /Claim check \(evidence\/blocked\): 1 blocking, 0 need proof/);
     assert.match(markdown, /Claim\/test mismatch: npm run test/);
     assert.match(markdown, /event=session:raw_session:42/);
+    assert.match(markdown, /transcript: assistant: ran npm run test after wiring the timeline packet/);
     assert.match(markdown, /screenshot=artifacts\/crop\.png/);
     assert.match(markdown, /1 console errors/);
   });

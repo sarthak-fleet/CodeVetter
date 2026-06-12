@@ -2943,6 +2943,7 @@ export default function QuickReview() {
             label: anchor.label,
             source: anchor.source,
             status: anchor.status,
+            contextExcerpt: anchor.contextExcerpt?.slice(0, 2) ?? [],
             sourcePath: anchor.sourcePath ?? null,
             sourceLine: anchor.sourceLine ?? null,
             eventId: anchor.eventId ?? null,
@@ -4708,6 +4709,7 @@ export default function QuickReview() {
                                 anchor.sourcePath,
                                 anchor.sourceLine != null ? `line ${anchor.sourceLine}` : null,
                                 anchor.eventId,
+                                ...(anchor.contextExcerpt ?? []).slice(0, 2),
                               ]
                                 .filter(Boolean)
                                 .join(" · ")}
@@ -4715,7 +4717,10 @@ export default function QuickReview() {
                                 if (anchor.jump) void handleTimelineJump(anchor.jump);
                               }}
                             >
-                              {anchor.status ?? "unknown"} · {anchor.label}
+                              {[
+                                `${anchor.status ?? "unknown"} · ${anchor.label}`,
+                                anchor.contextExcerpt?.[0] ? `context: ${anchor.contextExcerpt[0]}` : null,
+                              ].filter(Boolean).join(" · ")}
                             </button>
                           ))}
                         </span>

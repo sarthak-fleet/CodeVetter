@@ -40,6 +40,7 @@ export interface AgentFixPacketTimelineAnchor {
   label: string;
   source: string;
   status?: "passed" | "failed" | "stale" | "unknown";
+  contextExcerpt?: string[];
   sourcePath?: string | null;
   sourceLine?: number | null;
   eventId?: string | null;
@@ -230,6 +231,9 @@ export function renderAgentFixPacketMarkdown(packet: AgentFixPacket): string {
         anchor.jumpPath ? `jumpPath=${anchor.jumpPath}` : null,
       ].filter(Boolean);
       out.push(`  - ${anchor.label}${parts.length > 0 ? ` (${parts.join("; ")})` : ""}`);
+      anchor.contextExcerpt?.slice(0, 2).forEach((excerpt) => {
+        out.push(`    - transcript: ${excerpt}`);
+      });
     });
   }
   out.push("", "Findings:");

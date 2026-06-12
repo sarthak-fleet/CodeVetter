@@ -265,6 +265,10 @@ describe("buildReviewerProofMarkdown", () => {
             session_id: "session-1",
             status: "failed",
             artifacts: ["artifacts/review-proof.log"],
+            context_excerpt: [
+              "assistant: ran npm run test:review-proof after editing timeline anchors",
+              "tool: failed with one assertion",
+            ],
           },
         ],
       },
@@ -287,6 +291,10 @@ describe("buildReviewerProofMarkdown", () => {
     assert.match(evidenceStep?.detail ?? "", /1 command anchor, 1 failed/);
     assert.equal(evidenceStep?.anchors?.[0]?.eventId, "session:raw_session:42");
     assert.equal(evidenceStep?.anchors?.[0]?.artifact, "artifacts/review-proof.log");
+    assert.equal(
+      evidenceStep?.anchors?.[0]?.contextExcerpt?.[0],
+      "assistant: ran npm run test:review-proof after editing timeline anchors",
+    );
     assert.equal(evidenceStep?.anchors?.[0]?.jump?.kind, "command_source");
     assert.equal(evidenceStep?.anchors?.[0]?.jump?.path, "/tmp/session.jsonl");
     assert.equal(evidenceStep?.jump?.kind, "command_source");
@@ -294,6 +302,10 @@ describe("buildReviewerProofMarkdown", () => {
     assert.equal(claimCheckStep?.status, "blocked");
     assert.match(claimCheckStep?.detail ?? "", /1 blocking, 0 need proof/);
     assert.equal(claimCheckStep?.anchors?.[0]?.label, "Claim/test mismatch: npm run test:review-proof");
+    assert.equal(
+      claimCheckStep?.anchors?.[0]?.contextExcerpt?.[0],
+      "assistant: ran npm run test:review-proof after editing timeline anchors",
+    );
     assert.equal(claimCheckStep?.anchors?.[0]?.jump?.kind, "command_source");
     assert.equal(timeline.find((item) => item.id === "fix-packet")?.jump?.findingIndex, 0);
     const worktreeStep = timeline.find((item) => item.id === "worktree");
@@ -399,6 +411,7 @@ describe("buildReviewerProofMarkdown", () => {
               eventId: "session:raw_session:42",
               sessionId: "session-1",
               artifact: "artifacts/review-proof.log",
+              contextExcerpt: ["assistant: replayed the failing review proof command"],
               jump: {
                 kind: "command_source",
                 label: "Preview command source",
@@ -487,6 +500,7 @@ describe("buildReviewerProofMarkdown", () => {
 
     assert.match(markdown, /### Verification timeline/);
     assert.match(markdown, /Synthetic QA.*blocked/);
+    assert.match(markdown, /transcript: assistant: replayed the failing review proof command/);
     assert.match(markdown, /### Synthetic QA post-fix comparison/);
     assert.match(markdown, /fixed.*Post-fix QA passed/);
     assert.match(markdown, /Before: FAIL repo_playwright \/review/);
