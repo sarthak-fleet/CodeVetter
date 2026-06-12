@@ -956,7 +956,7 @@ function scoreTone(score: number): string {
   return "text-red-300";
 }
 
-const ROADMAP_RELEASE_VERSION = "1.1.37";
+const ROADMAP_RELEASE_VERSION = "1.1.38";
 
 const ROADMAP_RELEASE_ITEMS = [
   {
