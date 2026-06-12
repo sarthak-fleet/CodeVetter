@@ -23,6 +23,7 @@ import type {
   IndexStats,
   LiveUsageResult,
   ProviderAccount,
+  SessionAdapterRun,
   SessionScorecard,
   TokenUsageStats,
   TriggerIndexResult,
@@ -36,6 +37,7 @@ import {
   getIndexStats,
   getTokenUsageStats,
   isTauriAvailable,
+  listAiSessionAdapterRuns,
   listProviderAccounts,
   triggerIndex,
 } from "@/lib/tauri-ipc";
@@ -47,6 +49,18 @@ function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
   return String(n);
+}
+
+function formatShortDateTime(value: string | null | undefined): string {
+  if (!value) return "not indexed";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 function planLabel(plan: string | null): string {
@@ -590,6 +604,7 @@ let _cachedDashboard: {
   usages: Record<string, AccountUsage>;
   liveUsages: Record<string, LiveUsageResult>;
   sessionScorecard: SessionScorecard | null;
+  adapterRuns: SessionAdapterRun[];
   fetchedAt: number;
 } | null = null;
 
@@ -956,12 +971,12 @@ function scoreTone(score: number): string {
   return "text-red-300";
 }
 
-const ROADMAP_RELEASE_VERSION = "1.1.41";
+const ROADMAP_RELEASE_VERSION = "1.1.42";
 
 const ROADMAP_RELEASE_ITEMS = [
   {
     label: "AI session adapters",
-    detail: "Production adapter scans now persist source-health rows and parse warnings.",
+    detail: "Home now shows production source-health runs and parse warnings.",
     href: "/review",
   },
   {
@@ -1208,6 +1223,104 @@ function SessionScorecardPanel({ scorecard }: { scorecard: SessionScorecard | nu
   );
 }
 
+function latestRunsByAdapter(runs: SessionAdapterRun[]): SessionAdapterRun[] {
+  const byAdapter = new Map<string, SessionAdapterRun>();
+  for (const run of runs) {
+    const current = byAdapter.get(run.adapter_id);
+    if (!current || run.created_at > current.created_at) {
+      byAdapter.set(run.adapter_id, run);
+    }
+  }
+  return [...byAdapter.values()].sort((a, b) => a.adapter_id.localeCompare(b.adapter_id));
+}
+
+function AdapterSourceHealthPanel({ runs }: { runs: SessionAdapterRun[] }) {
+  const latestRuns = latestRunsByAdapter(runs);
+  if (latestRuns.length === 0) return null;
+
+  const totalWarnings = latestRuns.reduce((sum, run) => sum + run.parse_warnings.length, 0);
+  const totalSessions = latestRuns.reduce((sum, run) => sum + run.sessions_indexed, 0);
+  const totalMessages = latestRuns.reduce((sum, run) => sum + run.messages_indexed, 0);
+
+  return (
+    <div className="cv-panel overflow-hidden">
+      <div className="grid gap-px bg-[#151515] lg:grid-cols-[0.9fr_2.1fr]">
+        <div className="bg-[#08090a] px-4 py-3">
+          <div className="flex items-center gap-2">
+            <Activity size={15} className="text-emerald-300" />
+            <div className="cv-label text-slate-500">source health</div>
+          </div>
+          <div className="mt-3 grid grid-cols-3 gap-2">
+            <div>
+              <div className="font-mono text-lg text-slate-100">{latestRuns.length}</div>
+              <div className="text-[10px] text-slate-600">adapters</div>
+            </div>
+            <div>
+              <div className="font-mono text-lg text-slate-100">{totalSessions}</div>
+              <div className="text-[10px] text-slate-600">sessions</div>
+            </div>
+            <div>
+              <div className="font-mono text-lg text-slate-100">{formatTokens(totalMessages)}</div>
+              <div className="text-[10px] text-slate-600">messages</div>
+            </div>
+          </div>
+          {totalWarnings > 0 && (
+            <div className="mt-2 text-[10px] text-amber-300/80">
+              {totalWarnings} parse warning{totalWarnings === 1 ? "" : "s"}
+            </div>
+          )}
+        </div>
+
+        <div className="grid gap-px bg-[#151515] md:grid-cols-3">
+          {latestRuns.map((run) => {
+            const firstWarning = run.parse_warnings[0];
+            const samplePath = run.sample_source_paths[0] ?? run.source_roots[0] ?? "";
+            return (
+              <div key={run.id} className="min-w-0 bg-[#08090a] px-3 py-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-slate-200">
+                      {run.adapter_id}
+                    </div>
+                    <div className="mt-0.5 truncate text-[10px] text-slate-600">
+                      {formatShortDateTime(run.last_indexed_at ?? run.created_at)}
+                    </div>
+                  </div>
+                  <Badge
+                    variant="outline"
+                    className={`shrink-0 rounded-full px-1.5 py-0 text-[9px] uppercase ${
+                      firstWarning
+                        ? "border-amber-500/25 text-amber-300/80"
+                        : "border-emerald-500/25 text-emerald-300/80"
+                    }`}
+                  >
+                    {firstWarning ? "watch" : "ok"}
+                  </Badge>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-1.5 text-[10px] text-slate-500">
+                  <span>{run.sessions_indexed} sessions</span>
+                  <span>{formatTokens(run.messages_indexed)} messages</span>
+                  <span>{run.supports_incremental ? "incremental" : "full scan"}</span>
+                </div>
+                {samplePath && (
+                  <div className="mt-2 truncate font-mono text-[10px] text-slate-600" title={samplePath}>
+                    {samplePath}
+                  </div>
+                )}
+                {firstWarning && (
+                  <div className="mt-2 line-clamp-2 text-[10px] leading-4 text-amber-200/70">
+                    {firstWarning}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes
 
 export default function Home() {
@@ -1221,6 +1334,9 @@ export default function Home() {
   const [liveUsages, setLiveUsages] = useState<Record<string, LiveUsageResult>>(_cachedDashboard?.liveUsages ?? {});
   const [sessionScorecard, setSessionScorecard] = useState<SessionScorecard | null>(
     _cachedDashboard?.sessionScorecard ?? null,
+  );
+  const [adapterRuns, setAdapterRuns] = useState<SessionAdapterRun[]>(
+    _cachedDashboard?.adapterRuns ?? [],
   );
   const [checkingLiveFor, setCheckingLiveFor] = useState<string | null>(null);
 
@@ -1255,6 +1371,7 @@ export default function Home() {
         tokenUsageResult,
         accountsResult,
         scorecardResult,
+        adapterRunsResult,
         cachedUsagesResult,
       ] = await Promise.all([
         getIndexStats().then(
@@ -1276,6 +1393,10 @@ export default function Home() {
           (v) => ({ status: "fulfilled" as const, value: v }),
           (e) => ({ status: "rejected" as const, reason: e })
         ),
+        listAiSessionAdapterRuns({ limit: 12 }).then(
+          (v) => ({ status: "fulfilled" as const, value: v }),
+          (e) => ({ status: "rejected" as const, reason: e })
+        ),
         cachedUsagePromise,
       ]);
 
@@ -1287,6 +1408,9 @@ export default function Home() {
       }
       if (scorecardResult.status === "fulfilled") {
         setSessionScorecard(scorecardResult.value);
+      }
+      if (adapterRunsResult.status === "fulfilled") {
+        setAdapterRuns(adapterRunsResult.value);
       }
 
       // Seed usage map with cached-ID results that came back alongside the rest.
@@ -1361,9 +1485,10 @@ export default function Home() {
       usages: accountUsages,
       liveUsages,
       sessionScorecard,
+      adapterRuns,
       fetchedAt: Date.now(),
     };
-  }, [loading, stats, tokenUsage, accounts, accountUsages, liveUsages, sessionScorecard]);
+  }, [loading, stats, tokenUsage, accounts, accountUsages, liveUsages, sessionScorecard, adapterRuns]);
 
   // Refresh without showing loading spinners (for background event updates)
   const refreshDashboard = useCallback(() => {
@@ -1514,6 +1639,8 @@ export default function Home() {
       <VerificationWorkbenchPanel scorecard={sessionScorecard} />
 
       <SessionScorecardPanel scorecard={sessionScorecard} />
+
+      <AdapterSourceHealthPanel runs={adapterRuns} />
 
       {/* Token period cards */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">

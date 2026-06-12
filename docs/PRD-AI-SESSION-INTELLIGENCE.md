@@ -235,7 +235,7 @@ Acceptance:
 
 Remaining:
 
-- Use production adapter run metadata to drive source-health UI and trend views. Production index passes now persist adapter roots, sample paths/session IDs, counts, incremental support, and bounded parse warnings into `session_adapter_runs`.
+- Extend source-health into trend views and adapter-specific drilldowns. Production index passes now persist adapter roots, sample paths/session IDs, counts, incremental support, and bounded parse warnings into `session_adapter_runs`, and Home shows the latest source-health status per adapter.
 
 ### Phase 2: Usage And Stats Contracts
 
