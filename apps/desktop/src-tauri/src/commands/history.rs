@@ -76,423 +76,417 @@ fn full_index_impl(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), Strin
         // late in the iteration order (e.g. after a repo move) were never
         // scanned, freezing token-usage stats.
         let project_result: Result<(), String> = (|| {
-        let project_dir_name = project_path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+            let project_dir_name = project_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
 
-        let display_name = resolve_project_display_name(&project_dir_name);
-        let dir_path_str = project_path.to_string_lossy().to_string();
+            let display_name = resolve_project_display_name(&project_dir_name);
+            let dir_path_str = project_path.to_string_lossy().to_string();
 
-        // Re-use existing project ID if the dir_path already exists, otherwise
-        // create a new one.  This avoids generating a fresh UUID on every
-        // re-index which would orphan sessions.
-        let project_id = queries::get_project_id_by_dir(&conn, &dir_path_str)
-            .map_err(|e| e.to_string())?
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            // Re-use existing project ID if the dir_path already exists, otherwise
+            // create a new one.  This avoids generating a fresh UUID on every
+            // re-index which would orphan sessions.
+            let project_id = queries::get_project_id_by_dir(&conn, &dir_path_str)
+                .map_err(|e| e.to_string())?
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let now = chrono::Utc::now().to_rfc3339();
+            let now = chrono::Utc::now().to_rfc3339();
 
-        queries::upsert_project(
-            &conn,
-            &queries::ProjectInput {
-                id: project_id.clone(),
-                display_name: display_name.clone(),
-                dir_path: dir_path_str,
-                session_count: None,
-                last_activity: Some(now.clone()),
-                created_at: now.clone(),
-            },
-        )
-        .map_err(|e| e.to_string())?;
-
-        // Look for JSONL files inside the project directory (recursively).
-        let jsonl_files: Vec<_> = walkdir(&project_path, "jsonl");
-
-        for jsonl_path in &jsonl_files {
-            let jsonl_path_str = jsonl_path.to_string_lossy().to_string();
-
-            // ── Incremental check ────────────────────────────────
-            let file_meta = std::fs::metadata(jsonl_path).ok();
-            let file_size = file_meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
-            let file_mtime_str = file_meta
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
-
-            let existing = queries::get_session_by_jsonl_path(&conn, &jsonl_path_str)
-                .map_err(|e| e.to_string())?;
-
-            // If the file mtime is unchanged AND the session already has
-            // messages, skip it.  Sessions with 0 messages (from the quick
-            // startup index) always need a full parse.
-            if let Some(ref meta) = existing {
-                if meta.file_mtime.as_deref() == file_mtime_str.as_deref()
-                    && meta.message_count > 0
-                {
-                    skipped_sessions += 1;
-                    continue;
-                }
-            }
-
-            // Determine byte offset for incremental reading.  If the file has
-            // grown (append-only) AND the session already has messages, seek
-            // to the old size and only parse new lines.  Sessions with 0
-            // messages need a full read from the start.
-            let byte_offset: u64 = match &existing {
-                Some(meta)
-                    if meta.file_size_bytes > 0
-                        && file_size >= meta.file_size_bytes
-                        && meta.message_count > 0 =>
-                {
-                    meta.file_size_bytes as u64
-                }
-                _ => 0,
-            };
-
-            // ── Parse the JSONL ──────────────────────────────────
-            let file = match std::fs::File::open(jsonl_path) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-
-            let mut reader = std::io::BufReader::new(file);
-
-            // We need session-level metadata from existing records when doing
-            // incremental reads.  For a full read we extract them from the
-            // first message.
-            let mut session_id: Option<String> = existing.as_ref().map(|m| m.id.clone());
-            let mut session_version: Option<String> = None;
-            let mut session_git_branch: Option<String> = None;
-            let mut session_cwd: Option<String> = None;
-            let mut session_slug: Option<String> = None;
-            let mut model_used: Option<String> = None;
-
-            let mut msg_count: i64 = existing.as_ref().map(|m| m.message_count).unwrap_or(0);
-            let mut total_input: i64 = existing
-                .as_ref()
-                .map(|m| m.total_input_tokens)
-                .unwrap_or(0);
-            let mut total_output: i64 = existing
-                .as_ref()
-                .map(|m| m.total_output_tokens)
-                .unwrap_or(0);
-            let mut total_cache_read: i64 = existing
-                .as_ref()
-                .map(|m| m.cache_read_tokens)
-                .unwrap_or(0);
-            let mut total_cache_creation: i64 = existing
-                .as_ref()
-                .map(|m| m.cache_creation_tokens)
-                .unwrap_or(0);
-            let mut compaction_count: i64 = existing
-                .as_ref()
-                .map(|m| m.compaction_count)
-                .unwrap_or(0);
-
-            let mut first_message: Option<String> = None;
-            let mut last_message: Option<String> = None;
-
-            // Per-day message counts. Flushed to cc_session_days once the
-            // file is fully parsed. We only persist counts (not raw rows) —
-            // see purge_messages_to_buckets_once for the rationale.
-            let mut day_counts: std::collections::HashMap<String, i64> =
-                std::collections::HashMap::new();
-
-            // If doing a full re-read (offset == 0) we need the first message
-            // timestamp.  For incremental we keep whatever is in the DB.
-            let is_incremental = byte_offset > 0;
-
-            if !is_incremental {
-                // Full read: reset accumulators + per-day buckets so we
-                // don't double-count when re-parsing from scratch.
-                msg_count = 0;
-                total_input = 0;
-                total_output = 0;
-                total_cache_read = 0;
-                total_cache_creation = 0;
-                compaction_count = 0;
-                if let Some(ref meta) = existing {
-                    let _ = queries::reset_session_days(&conn, &meta.id);
-                }
-            }
-
-            // Seek to the byte offset for incremental reading.
-            if byte_offset > 0 {
-                if reader.seek(SeekFrom::Start(byte_offset)).is_err() {
-                    continue;
-                }
-            }
-
-            // Track the line number relative to the whole file.  For
-            // incremental reads we estimate the starting line from the
-            // existing message count.
-            let mut line_number: i64 = if is_incremental { msg_count } else { 0 };
-            let mut new_messages = 0u64;
-
-            let mut line_buf = String::new();
-            loop {
-                line_buf.clear();
-                match reader.read_line(&mut line_buf) {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-
-                let line = line_buf.trim();
-                if line.is_empty() {
-                    continue;
-                }
-
-                let parsed: Value = match serde_json::from_str(line) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        line_number += 1;
-                        continue;
-                    }
-                };
-
-                // ── Skip non-indexable types ─────────────────────
-                let msg_type = parsed
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-
-                // Skip non-message metadata rows that bloat the DB without carrying
-                // tokens or displayable content. Dropping these cuts row count ~95%.
-                if matches!(
-                    msg_type,
-                    "progress"
-                        | "file-history-snapshot"
-                        | "queue-operation"
-                        | "last-prompt"
-                        | "permission-mode"
-                        | "pr-link"
-                        | "agent-name"
-                        | "custom-title"
-                        | "attachment"
-                ) {
-                    line_number += 1;
-                    continue;
-                }
-
-                // ── Track compaction events ─────────────────────
-                if msg_type == "summary" {
-                    compaction_count += 1;
-                }
-                if parsed.get("autoCompact").and_then(|v| v.as_bool()).unwrap_or(false)
-                    || parsed.get("isCompacted").and_then(|v| v.as_bool()).unwrap_or(false)
-                {
-                    compaction_count += 1;
-                }
-
-                // ── Extract session-level metadata from first msg ─
-                if session_id.is_none() {
-                    session_id = parsed
-                        .get("sessionId")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                }
-                // Fall back to generating a UUID if no sessionId in file.
-                if session_id.is_none() {
-                    session_id = Some(uuid::Uuid::new_v4().to_string());
-                }
-
-                if session_version.is_none() {
-                    session_version = parsed
-                        .get("version")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                }
-                if session_git_branch.is_none() {
-                    session_git_branch = parsed
-                        .get("gitBranch")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                }
-                if session_cwd.is_none() {
-                    session_cwd = parsed
-                        .get("cwd")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                }
-                if session_slug.is_none() {
-                    session_slug = parsed
-                        .get("slug")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                }
-
-                // ── Message UUID ─────────────────────────────────
-                let msg_id = parsed
-                    .get("uuid")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-                // ── Role ─────────────────────────────────────────
-                let role = parsed
-                    .get("message")
-                    .and_then(|m| m.get("role"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-
-                // ── Timestamp ────────────────────────────────────
-                let ts = parsed
-                    .get("timestamp")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-
-                if first_message.is_none() {
-                    first_message = ts.clone();
-                }
-                last_message = ts.clone();
-
-                // ── isSidechain ──────────────────────────────────
-                let is_sidechain = parsed
-                    .get("isSidechain")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-
-                // ── parentUuid ───────────────────────────────────
-                let parent_uuid = parsed
-                    .get("parentUuid")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-
-                // ── Token usage ──────────────────────────────────
-                let usage = parsed
-                    .get("message")
-                    .and_then(|m| m.get("usage"));
-
-                let input_tokens = usage
-                    .and_then(|u| u.get("input_tokens"))
-                    .and_then(|v| v.as_i64());
-                let cache_creation = usage
-                    .and_then(|u| u.get("cache_creation_input_tokens"))
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let cache_read = usage
-                    .and_then(|u| u.get("cache_read_input_tokens"))
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let output_tokens = usage
-                    .and_then(|u| u.get("output_tokens"))
-                    .and_then(|v| v.as_i64());
-
-                // Total input includes cache tokens for accurate billing.
-                let effective_input = input_tokens
-                    .map(|it| it + cache_creation + cache_read);
-
-                if let Some(it) = effective_input {
-                    total_input += it;
-                }
-                if let Some(ot) = output_tokens {
-                    total_output += ot;
-                }
-                total_cache_read += cache_read;
-                total_cache_creation += cache_creation;
-
-                // ── Model ────────────────────────────────────────
-                if let Some(m) = parsed
-                    .get("message")
-                    .and_then(|msg| msg.get("model"))
-                    .and_then(|v| v.as_str())
-                {
-                    model_used = Some(m.to_string());
-                }
-
-                // ── Slug (can appear on any message) ─────────────
-                if let Some(s) = parsed.get("slug").and_then(|v| v.as_str()) {
-                    session_slug = Some(s.to_string());
-                }
-
-                // ── Increment per-day bucket ─────────────────────
-                // We accumulate in-memory and flush once per file below.
-                // Day = local-time date of the message timestamp.
-                if let Some(ts_str) = ts.as_deref() {
-                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts_str) {
-                        let day = dt
-                            .with_timezone(&chrono::Local)
-                            .format("%Y-%m-%d")
-                            .to_string();
-                        *day_counts.entry(day).or_insert(0) += 1;
-                    }
-                }
-                // msg_id, parent_uuid, role, msg_type, is_sidechain — no longer
-                // persisted; UI never read them. Kept locally above because
-                // future log lines may reference them via parent_uuid chains.
-                let _ = (msg_id, parent_uuid, role, is_sidechain, msg_type);
-
-                msg_count += 1;
-                new_messages += 1;
-                line_number += 1;
-            }
-
-            // Flush per-day bucket counts to cc_session_days. Ignore errors
-            // for individual buckets — partial writes are fine, we'll re-bump
-            // on the next pass.
-            if let Some(ref sid) = session_id {
-                for (day, n) in &day_counts {
-                    let _ = queries::bump_session_day(&conn, sid, day, *n);
-                }
-            }
-
-            // ── Upsert session ───────────────────────────────────
-            let sid = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-            let estimated_cost = estimate_cost(
-                model_used.as_deref().unwrap_or(""),
-                total_input,
-                total_output,
-                total_cache_read,
-                total_cache_creation,
-            );
-
-            queries::upsert_session(
+            queries::upsert_project(
                 &conn,
-                &queries::SessionInput {
-                    id: sid,
-                    project_id: project_id.clone(),
-                    agent_type: Some("claude-code".to_string()),
-                    jsonl_path: Some(jsonl_path_str),
-                    git_branch: session_git_branch,
-                    cwd: session_cwd,
-                    cli_version: session_version,
-                    first_message,
-                    last_message,
-                    message_count: Some(msg_count),
-                    total_input_tokens: Some(total_input),
-                    total_output_tokens: Some(total_output),
-                    model_used,
-                    slug: session_slug,
-                    file_size_bytes: Some(file_size),
-                    indexed_at: Some(now.clone()),
-                    file_mtime: file_mtime_str,
-                    cache_read_tokens: Some(total_cache_read),
-                    cache_creation_tokens: Some(total_cache_creation),
-                    compaction_count: Some(compaction_count),
-                    estimated_cost_usd: Some(estimated_cost),
+                &queries::ProjectInput {
+                    id: project_id.clone(),
+                    display_name: display_name.clone(),
+                    dir_path: dir_path_str,
+                    session_count: None,
+                    last_activity: Some(now.clone()),
+                    created_at: now.clone(),
                 },
             )
             .map_err(|e| e.to_string())?;
 
-            indexed_sessions += 1;
-            indexed_messages += new_messages;
-        }
+            // Look for JSONL files inside the project directory (recursively).
+            let jsonl_files: Vec<_> = walkdir(&project_path, "jsonl");
 
-        // Update project session count.
-        let session_count = jsonl_files.len() as i64;
-        conn.execute(
-            "UPDATE cc_projects SET session_count = ?2 WHERE id = ?1",
-            rusqlite::params![project_id, session_count],
-        )
-        .map_err(|e: rusqlite::Error| e.to_string())?;
+            for jsonl_path in &jsonl_files {
+                let jsonl_path_str = jsonl_path.to_string_lossy().to_string();
 
-        // Update display name from session cwd if available (more reliable
-        // than decoding the encoded directory name).
-        let cwd_name: Option<String> = conn
+                // ── Incremental check ────────────────────────────────
+                let file_meta = std::fs::metadata(jsonl_path).ok();
+                let file_size = file_meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
+                let file_mtime_str = file_meta
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+
+                let existing = queries::get_session_by_jsonl_path(&conn, &jsonl_path_str)
+                    .map_err(|e| e.to_string())?;
+
+                // If the file mtime is unchanged AND the session already has
+                // messages, skip it.  Sessions with 0 messages (from the quick
+                // startup index) always need a full parse.
+                if let Some(ref meta) = existing {
+                    if meta.file_mtime.as_deref() == file_mtime_str.as_deref()
+                        && meta.message_count > 0
+                    {
+                        skipped_sessions += 1;
+                        continue;
+                    }
+                }
+
+                // Determine byte offset for incremental reading.  If the file has
+                // grown (append-only) AND the session already has messages, seek
+                // to the old size and only parse new lines.  Sessions with 0
+                // messages need a full read from the start.
+                let byte_offset: u64 = match &existing {
+                    Some(meta)
+                        if meta.file_size_bytes > 0
+                            && file_size >= meta.file_size_bytes
+                            && meta.message_count > 0 =>
+                    {
+                        meta.file_size_bytes as u64
+                    }
+                    _ => 0,
+                };
+
+                // ── Parse the JSONL ──────────────────────────────────
+                let file = match std::fs::File::open(jsonl_path) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+
+                let mut reader = std::io::BufReader::new(file);
+
+                // We need session-level metadata from existing records when doing
+                // incremental reads.  For a full read we extract them from the
+                // first message.
+                let mut session_id: Option<String> = existing.as_ref().map(|m| m.id.clone());
+                let mut session_version: Option<String> = None;
+                let mut session_git_branch: Option<String> = None;
+                let mut session_cwd: Option<String> = None;
+                let mut session_slug: Option<String> = None;
+                let mut model_used: Option<String> = None;
+
+                let mut msg_count: i64 = existing.as_ref().map(|m| m.message_count).unwrap_or(0);
+                let mut total_input: i64 =
+                    existing.as_ref().map(|m| m.total_input_tokens).unwrap_or(0);
+                let mut total_output: i64 = existing
+                    .as_ref()
+                    .map(|m| m.total_output_tokens)
+                    .unwrap_or(0);
+                let mut total_cache_read: i64 =
+                    existing.as_ref().map(|m| m.cache_read_tokens).unwrap_or(0);
+                let mut total_cache_creation: i64 = existing
+                    .as_ref()
+                    .map(|m| m.cache_creation_tokens)
+                    .unwrap_or(0);
+                let mut compaction_count: i64 =
+                    existing.as_ref().map(|m| m.compaction_count).unwrap_or(0);
+
+                let mut first_message: Option<String> = None;
+                let mut last_message: Option<String> = None;
+
+                // Per-day message counts. Flushed to cc_session_days once the
+                // file is fully parsed. We only persist counts (not raw rows) —
+                // see purge_messages_to_buckets_once for the rationale.
+                let mut day_counts: std::collections::HashMap<String, i64> =
+                    std::collections::HashMap::new();
+
+                // If doing a full re-read (offset == 0) we need the first message
+                // timestamp.  For incremental we keep whatever is in the DB.
+                let is_incremental = byte_offset > 0;
+
+                if !is_incremental {
+                    // Full read: reset accumulators + per-day buckets so we
+                    // don't double-count when re-parsing from scratch.
+                    msg_count = 0;
+                    total_input = 0;
+                    total_output = 0;
+                    total_cache_read = 0;
+                    total_cache_creation = 0;
+                    compaction_count = 0;
+                    if let Some(ref meta) = existing {
+                        let _ = queries::reset_session_days(&conn, &meta.id);
+                    }
+                }
+
+                // Seek to the byte offset for incremental reading.
+                if byte_offset > 0 {
+                    if reader.seek(SeekFrom::Start(byte_offset)).is_err() {
+                        continue;
+                    }
+                }
+
+                // Track the line number relative to the whole file.  For
+                // incremental reads we estimate the starting line from the
+                // existing message count.
+                let mut line_number: i64 = if is_incremental { msg_count } else { 0 };
+                let mut new_messages = 0u64;
+
+                let mut line_buf = String::new();
+                loop {
+                    line_buf.clear();
+                    match reader.read_line(&mut line_buf) {
+                        Ok(0) => break, // EOF
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+
+                    let line = line_buf.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    let parsed: Value = match serde_json::from_str(line) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            line_number += 1;
+                            continue;
+                        }
+                    };
+
+                    // ── Skip non-indexable types ─────────────────────
+                    let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                    // Skip non-message metadata rows that bloat the DB without carrying
+                    // tokens or displayable content. Dropping these cuts row count ~95%.
+                    if matches!(
+                        msg_type,
+                        "progress"
+                            | "file-history-snapshot"
+                            | "queue-operation"
+                            | "last-prompt"
+                            | "permission-mode"
+                            | "pr-link"
+                            | "agent-name"
+                            | "custom-title"
+                            | "attachment"
+                    ) {
+                        line_number += 1;
+                        continue;
+                    }
+
+                    // ── Track compaction events ─────────────────────
+                    if msg_type == "summary" {
+                        compaction_count += 1;
+                    }
+                    if parsed
+                        .get("autoCompact")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                        || parsed
+                            .get("isCompacted")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                    {
+                        compaction_count += 1;
+                    }
+
+                    // ── Extract session-level metadata from first msg ─
+                    if session_id.is_none() {
+                        session_id = parsed
+                            .get("sessionId")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+                    // Fall back to generating a UUID if no sessionId in file.
+                    if session_id.is_none() {
+                        session_id = Some(uuid::Uuid::new_v4().to_string());
+                    }
+
+                    if session_version.is_none() {
+                        session_version = parsed
+                            .get("version")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+                    if session_git_branch.is_none() {
+                        session_git_branch = parsed
+                            .get("gitBranch")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+                    if session_cwd.is_none() {
+                        session_cwd = parsed
+                            .get("cwd")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+                    if session_slug.is_none() {
+                        session_slug = parsed
+                            .get("slug")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+
+                    // ── Message UUID ─────────────────────────────────
+                    let msg_id = parsed
+                        .get("uuid")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+                    // ── Role ─────────────────────────────────────────
+                    let role = parsed
+                        .get("message")
+                        .and_then(|m| m.get("role"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+
+                    // ── Timestamp ────────────────────────────────────
+                    let ts = parsed
+                        .get("timestamp")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+
+                    if first_message.is_none() {
+                        first_message = ts.clone();
+                    }
+                    last_message = ts.clone();
+
+                    // ── isSidechain ──────────────────────────────────
+                    let is_sidechain = parsed
+                        .get("isSidechain")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    // ── parentUuid ───────────────────────────────────
+                    let parent_uuid = parsed
+                        .get("parentUuid")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+
+                    // ── Token usage ──────────────────────────────────
+                    let usage = parsed.get("message").and_then(|m| m.get("usage"));
+
+                    let input_tokens = usage
+                        .and_then(|u| u.get("input_tokens"))
+                        .and_then(|v| v.as_i64());
+                    let cache_creation = usage
+                        .and_then(|u| u.get("cache_creation_input_tokens"))
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let cache_read = usage
+                        .and_then(|u| u.get("cache_read_input_tokens"))
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let output_tokens = usage
+                        .and_then(|u| u.get("output_tokens"))
+                        .and_then(|v| v.as_i64());
+
+                    // Total input includes cache tokens for accurate billing.
+                    let effective_input = input_tokens.map(|it| it + cache_creation + cache_read);
+
+                    if let Some(it) = effective_input {
+                        total_input += it;
+                    }
+                    if let Some(ot) = output_tokens {
+                        total_output += ot;
+                    }
+                    total_cache_read += cache_read;
+                    total_cache_creation += cache_creation;
+
+                    // ── Model ────────────────────────────────────────
+                    if let Some(m) = parsed
+                        .get("message")
+                        .and_then(|msg| msg.get("model"))
+                        .and_then(|v| v.as_str())
+                    {
+                        model_used = Some(m.to_string());
+                    }
+
+                    // ── Slug (can appear on any message) ─────────────
+                    if let Some(s) = parsed.get("slug").and_then(|v| v.as_str()) {
+                        session_slug = Some(s.to_string());
+                    }
+
+                    // ── Increment per-day bucket ─────────────────────
+                    // We accumulate in-memory and flush once per file below.
+                    // Day = local-time date of the message timestamp.
+                    if let Some(ts_str) = ts.as_deref() {
+                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts_str) {
+                            let day = dt
+                                .with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d")
+                                .to_string();
+                            *day_counts.entry(day).or_insert(0) += 1;
+                        }
+                    }
+                    // msg_id, parent_uuid, role, msg_type, is_sidechain — no longer
+                    // persisted; UI never read them. Kept locally above because
+                    // future log lines may reference them via parent_uuid chains.
+                    let _ = (msg_id, parent_uuid, role, is_sidechain, msg_type);
+
+                    msg_count += 1;
+                    new_messages += 1;
+                    line_number += 1;
+                }
+
+                // Flush per-day bucket counts to cc_session_days. Ignore errors
+                // for individual buckets — partial writes are fine, we'll re-bump
+                // on the next pass.
+                if let Some(ref sid) = session_id {
+                    for (day, n) in &day_counts {
+                        let _ = queries::bump_session_day(&conn, sid, day, *n);
+                    }
+                }
+
+                // ── Upsert session ───────────────────────────────────
+                let sid = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+                let estimated_cost = estimate_cost(
+                    model_used.as_deref().unwrap_or(""),
+                    total_input,
+                    total_output,
+                    total_cache_read,
+                    total_cache_creation,
+                );
+
+                queries::upsert_session(
+                    &conn,
+                    &queries::SessionInput {
+                        id: sid,
+                        project_id: project_id.clone(),
+                        agent_type: Some("claude-code".to_string()),
+                        jsonl_path: Some(jsonl_path_str),
+                        git_branch: session_git_branch,
+                        cwd: session_cwd,
+                        cli_version: session_version,
+                        first_message,
+                        last_message,
+                        message_count: Some(msg_count),
+                        total_input_tokens: Some(total_input),
+                        total_output_tokens: Some(total_output),
+                        model_used,
+                        slug: session_slug,
+                        file_size_bytes: Some(file_size),
+                        indexed_at: Some(now.clone()),
+                        file_mtime: file_mtime_str,
+                        cache_read_tokens: Some(total_cache_read),
+                        cache_creation_tokens: Some(total_cache_creation),
+                        compaction_count: Some(compaction_count),
+                        estimated_cost_usd: Some(estimated_cost),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+
+                indexed_sessions += 1;
+                indexed_messages += new_messages;
+            }
+
+            // Update project session count.
+            let session_count = jsonl_files.len() as i64;
+            conn.execute(
+                "UPDATE cc_projects SET session_count = ?2 WHERE id = ?1",
+                rusqlite::params![project_id, session_count],
+            )
+            .map_err(|e: rusqlite::Error| e.to_string())?;
+
+            // Update display name from session cwd if available (more reliable
+            // than decoding the encoded directory name).
+            let cwd_name: Option<String> = conn
             .query_row(
                 "SELECT cwd FROM cc_sessions WHERE project_id = ?1 AND cwd IS NOT NULL AND cwd != '' LIMIT 1",
                 rusqlite::params![project_id],
@@ -500,18 +494,18 @@ fn full_index_impl(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), Strin
             )
             .ok();
 
-        if let Some(ref cwd) = cwd_name {
-            let better_name = std::path::Path::new(cwd)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| display_name.clone());
-            let _ = conn.execute(
-                "UPDATE cc_projects SET display_name = ?2 WHERE id = ?1",
-                rusqlite::params![project_id, better_name],
-            );
-        }
+            if let Some(ref cwd) = cwd_name {
+                let better_name = std::path::Path::new(cwd)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| display_name.clone());
+                let _ = conn.execute(
+                    "UPDATE cc_projects SET display_name = ?2 WHERE id = ?1",
+                    rusqlite::params![project_id, better_name],
+                );
+            }
 
-        Ok(())
+            Ok(())
         })();
         if let Err(e) = project_result {
             log::error!("Skipping project {project_path:?}: {e}");
@@ -540,8 +534,7 @@ fn full_index_impl(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), Strin
                 .map_err(|e| e.to_string())?;
 
             if let Some(ref meta) = existing {
-                if meta.file_mtime.as_deref() == file_mtime_str.as_deref()
-                    && meta.message_count > 0
+                if meta.file_mtime.as_deref() == file_mtime_str.as_deref() && meta.message_count > 0
                 {
                     skipped_sessions += 1;
                     continue;
@@ -564,7 +557,10 @@ fn full_index_impl(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), Strin
                 Err(_) => continue,
             };
 
-            let meta_type = meta_parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let meta_type = meta_parsed
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if meta_type != "session_meta" {
                 continue;
             }
@@ -574,7 +570,11 @@ fn full_index_impl(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), Strin
                 None => continue,
             };
 
-            let codex_cwd = payload.get("cwd").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let codex_cwd = payload
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if codex_cwd.is_empty() {
                 continue;
             }
@@ -631,8 +631,8 @@ fn full_index_impl(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), Strin
 pub async fn get_index_stats(db: State<'_, DbState>) -> Result<Value, String> {
     let conn = conn_lock(&db)?;
     let stats = queries::get_index_stats(&conn).map_err(|e| e.to_string())?;
-    let last_indexed_at = queries::get_preference(&conn, "last_indexed_at")
-        .map_err(|e| e.to_string())?;
+    let last_indexed_at =
+        queries::get_preference(&conn, "last_indexed_at").map_err(|e| e.to_string())?;
     let mut result = json!(stats);
     result["last_indexed_at"] = json!(last_indexed_at);
     Ok(result)
@@ -818,7 +818,13 @@ fn resolve_project_display_name(dir_name: &str) -> String {
 // Cost estimation
 // ─────────────────────────────────────────────────────────────────
 
-fn estimate_cost(model: &str, total_input: i64, output_tokens: i64, cache_read: i64, cache_creation: i64) -> f64 {
+fn estimate_cost(
+    model: &str,
+    total_input: i64,
+    output_tokens: i64,
+    cache_read: i64,
+    cache_creation: i64,
+) -> f64 {
     // Per-million-token pricing (approximate as of early 2026)
     let (input_price, output_price, cache_read_price, cache_write_price) = match model {
         m if m.contains("opus") => (15.0, 75.0, 1.5, 18.75),
@@ -838,7 +844,8 @@ fn estimate_cost(model: &str, total_input: i64, output_tokens: i64, cache_read: 
     let cost = (base_input as f64 * input_price
         + output_tokens as f64 * output_price
         + cache_read as f64 * cache_read_price
-        + cache_creation as f64 * cache_write_price) / 1_000_000.0;
+        + cache_creation as f64 * cache_write_price)
+        / 1_000_000.0;
     (cost * 100.0).round() / 100.0 // round to cents
 }
 
@@ -889,8 +896,7 @@ fn parse_codex_session(
     let mut last_message: Option<String> = None;
     let mut new_messages: u64 = 0;
     let mut line_number: i64 = 0;
-    let mut day_counts: std::collections::HashMap<String, i64> =
-        std::collections::HashMap::new();
+    let mut day_counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
     for line_result in reader.lines() {
         let line = match line_result {
@@ -918,8 +924,12 @@ fn parse_codex_session(
             if let Some(p) = payload {
                 session_id = p.get("id").and_then(|v| v.as_str()).map(String::from);
                 session_cwd = p.get("cwd").and_then(|v| v.as_str()).map(String::from);
-                session_version = p.get("cli_version").and_then(|v| v.as_str()).map(String::from);
-                session_git_branch = p.get("git")
+                session_version = p
+                    .get("cli_version")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                session_git_branch = p
+                    .get("git")
                     .and_then(|g| g.get("branch"))
                     .and_then(|v| v.as_str())
                     .map(String::from);
@@ -927,7 +937,11 @@ fn parse_codex_session(
                     model_used = Some(m.to_string());
                 } else if let Some(mp) = p.get("model_provider").and_then(|v| v.as_str()) {
                     // Codex doesn't specify a model name; use a reasonable default
-                    model_used = Some(if mp == "openai" { "o3".to_string() } else { mp.to_string() });
+                    model_used = Some(if mp == "openai" {
+                        "o3".to_string()
+                    } else {
+                        mp.to_string()
+                    });
                 }
             }
             line_number += 1;
@@ -944,9 +958,18 @@ fn parse_codex_session(
                     if let Some(info) = p.get("info") {
                         if let Some(total_usage) = info.get("total_token_usage") {
                             // These are cumulative — always take the latest value
-                            let input_t = total_usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                            let output_t = total_usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                            let cached = total_usage.get("cached_input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                            let input_t = total_usage
+                                .get("input_tokens")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            let output_t = total_usage
+                                .get("output_tokens")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            let cached = total_usage
+                                .get("cached_input_tokens")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
                             total_input = input_t;
                             total_output = output_t;
                             total_cache_read = cached;
@@ -962,8 +985,14 @@ fn parse_codex_session(
 
                 // Extract token usage from response_item.payload.usage (if present)
                 if let Some(usage) = p.get("usage") {
-                    let input_t = usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let output_t = usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let input_t = usage
+                        .get("input_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let output_t = usage
+                        .get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
                     // Only use additive if no token_count events are providing cumulative totals
                     if total_input == 0 && total_output == 0 {
                         total_input += input_t;
@@ -972,7 +1001,8 @@ fn parse_codex_session(
                 }
 
                 // Timestamp
-                let ts = parsed.get("timestamp")
+                let ts = parsed
+                    .get("timestamp")
                     .and_then(|v| v.as_str())
                     .map(String::from);
                 if first_message.is_none() {
@@ -1078,7 +1108,9 @@ pub fn resolve_cursor_data_dir() -> std::path::PathBuf {
     #[cfg(target_os = "linux")]
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(home).join(".config").join("Cursor")
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("Cursor")
     }
     #[cfg(target_os = "windows")]
     {
@@ -1134,9 +1166,7 @@ pub fn read_cursor_item_table(key: &str) -> Option<String> {
 /// Older workspace-storage `state.vscdb` ItemTable entries (composerData,
 /// workbench.panel.aichat, etc.) are no longer produced and have been
 /// dropped from this indexer.
-fn index_cursor_sessions(
-    conn: &rusqlite::Connection,
-) -> Result<(u64, u64, u64), String> {
+fn index_cursor_sessions(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), String> {
     let db_path = resolve_cursor_global_db();
     if !db_path.exists() {
         return Ok((0, 0, 0));
@@ -1160,16 +1190,16 @@ fn index_cursor_sessions(
     // Collect every composer up-front so we can drop the statement and then
     // re-use the connection to query bubbles in the loop below.
     let composers: Vec<(String, String)> = {
-        let mut stmt = match cursor_db.prepare(
-            "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'",
-        ) {
+        let mut stmt = match cursor_db
+            .prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
+        {
             Ok(s) => s,
             Err(_) => return Ok((0, 0, 0)),
         };
         let mut out = Vec::new();
-        if let Ok(rows) =
-            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
-        {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
             for r in rows.flatten() {
                 if let Some(cid) = r.0.strip_prefix("composerData:") {
                     if cid == "empty-state-draft" || cid.is_empty() {
@@ -1186,9 +1216,7 @@ fn index_cursor_sessions(
         return Ok((0, 0, 0));
     }
 
-    let mut bubble_stmt = match cursor_db.prepare(
-        "SELECT value FROM cursorDiskKV WHERE key = ?1",
-    ) {
+    let mut bubble_stmt = match cursor_db.prepare("SELECT value FROM cursorDiskKV WHERE key = ?1") {
         Ok(s) => s,
         Err(_) => return Ok((0, 0, 0)),
     };
@@ -1321,7 +1349,9 @@ fn index_cursor_sessions(
                 let bubble_json: Option<String> = bubble_stmt
                     .query_row(rusqlite::params![key], |row| row.get::<_, String>(0))
                     .ok();
-                let Some(bubble_json) = bubble_json else { continue };
+                let Some(bubble_json) = bubble_json else {
+                    continue;
+                };
                 let bubble: Value = match serde_json::from_str(&bubble_json) {
                     Ok(v) => v,
                     Err(_) => continue,
@@ -1426,7 +1456,11 @@ fn resolve_all_claude_projects_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
 
     if let Ok(config_dirs) = std::env::var("CLAUDE_CONFIG_DIR") {
-        for raw in config_dirs.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        for raw in config_dirs
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             let projects_dir = std::path::PathBuf::from(raw).join("projects");
             if projects_dir.exists() && !dirs.contains(&projects_dir) {
                 dirs.push(projects_dir);

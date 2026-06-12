@@ -93,7 +93,8 @@ fn main() {
                                 // tray title with today's tokens. Decoupled
                                 // from the UI so it updates even when the app
                                 // window is hidden or on a non-Home page.
-                                if let Ok(stats) = crate::db::queries::get_token_usage_stats(&conn) {
+                                if let Ok(stats) = crate::db::queries::get_token_usage_stats(&conn)
+                                {
                                     let text = format_tokens_compact(stats.today);
                                     if let Some(tray) = periodic_handle.tray_by_id("main") {
                                         let _ = tray.set_title(Some(&text));
@@ -165,11 +166,18 @@ fn main() {
             commands::review::discard_fix,
             commands::review::revert_files,
             commands::review::revert_diff_hunk,
+            commands::procedure_events::record_review_procedure_event,
+            commands::procedure_events::list_review_procedure_events,
+            commands::procedure_events::suggest_review_verification_commands,
+            commands::procedure_events::run_review_verification_command,
+            commands::procedure_events::cancel_review_verification_command,
             // Blast radius (graph-aware PR analysis)
             commands::blast_radius::analyze_blast_radius,
             // Sessions (used by Home for index stats)
             commands::sessions::list_sessions,
             commands::sessions::merge_projects,
+            commands::session_intelligence::get_ai_session_scorecard,
+            commands::session_intelligence::list_ai_session_adapter_runs,
             // History / indexer
             commands::history::trigger_index,
             commands::history::get_index_stats,
@@ -227,6 +235,8 @@ fn main() {
             // Synthetic user QA
             commands::synthetic_qa::run_synthetic_qa,
             commands::synthetic_qa::discover_playwright_specs,
+            commands::synthetic_qa::record_synthetic_qa_run,
+            commands::synthetic_qa::list_synthetic_qa_runs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -308,9 +318,7 @@ fn run_initial_index(app_data_dir: std::path::PathBuf) -> Result<String, String>
                 .and_then(|m| m.modified().ok())
                 .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
 
-            if let Ok(Some(existing)) =
-                queries::get_session_by_jsonl_path(&conn, &jsonl_path_str)
-            {
+            if let Ok(Some(existing)) = queries::get_session_by_jsonl_path(&conn, &jsonl_path_str) {
                 if existing.file_mtime.as_deref() == file_mtime_str.as_deref() {
                     skipped += 1;
                     continue;
@@ -421,25 +429,45 @@ fn quick_parse_session_meta(path: &std::path::Path) -> (String, QuickMeta) {
             session_id = sid.to_string();
         }
         if meta.version.is_none() {
-            meta.version = parsed.get("version").and_then(|v| v.as_str()).map(String::from);
+            meta.version = parsed
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(String::from);
         }
         if meta.git_branch.is_none() {
-            meta.git_branch = parsed.get("gitBranch").and_then(|v| v.as_str()).map(String::from);
+            meta.git_branch = parsed
+                .get("gitBranch")
+                .and_then(|v| v.as_str())
+                .map(String::from);
         }
         if meta.cwd.is_none() {
             meta.cwd = parsed.get("cwd").and_then(|v| v.as_str()).map(String::from);
         }
         if meta.slug.is_none() {
-            meta.slug = parsed.get("slug").and_then(|v| v.as_str()).map(String::from);
+            meta.slug = parsed
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .map(String::from);
         }
         if meta.model.is_none() {
-            meta.model = parsed.get("message").and_then(|m| m.get("model")).and_then(|v| v.as_str()).map(String::from);
+            meta.model = parsed
+                .get("message")
+                .and_then(|m| m.get("model"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
         }
         if meta.first_timestamp.is_none() {
-            meta.first_timestamp = parsed.get("timestamp").and_then(|v| v.as_str()).map(String::from);
+            meta.first_timestamp = parsed
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .map(String::from);
         }
 
-        if meta.version.is_some() && meta.git_branch.is_some() && meta.cwd.is_some() && meta.first_timestamp.is_some() {
+        if meta.version.is_some()
+            && meta.git_branch.is_some()
+            && meta.cwd.is_some()
+            && meta.first_timestamp.is_some()
+        {
             break;
         }
     }
@@ -455,7 +483,11 @@ fn resolve_all_claude_projects_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
 
     if let Ok(config_dirs) = std::env::var("CLAUDE_CONFIG_DIR") {
-        for raw in config_dirs.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        for raw in config_dirs
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             let projects_dir = std::path::PathBuf::from(raw).join("projects");
             if projects_dir.exists() && !dirs.contains(&projects_dir) {
                 dirs.push(projects_dir);

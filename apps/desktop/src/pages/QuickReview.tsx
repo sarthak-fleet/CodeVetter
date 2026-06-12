@@ -47,10 +47,16 @@ import {
   repoPrefKey,
 } from "@/lib/quick-review-state";
 import {
+  buildCodebaseHistoryExplanations,
+  buildFocusedReviewMemoryGraph,
+  buildQaPostFixComparison,
   buildRevalidationChecklist,
   buildReviewerProofMarkdown,
+  buildVerificationTimeline,
+  type EvidenceCandidateStatus,
   formatHistoryCommandEvidence,
   type HistoryFindingSummary,
+  type ProcedureExecutionEvent,
 } from "@/lib/review-proof";
 import {
   syntheticQaFailureFinding,
@@ -65,6 +71,8 @@ import type {
   BlastRadiusReport,
   CliReviewFinding,
   CliReviewResult,
+  EvidenceCandidate,
+  EvidenceProcedureStep,
   FileLineData,
   FixChangedFile,
   FixFindingsResult,
@@ -73,9 +81,14 @@ import type {
   PullRequest,
   RawSessionContextItem,
   RepoHistoryContext,
+  ReviewProcedureEvent,
+  ReviewQaRunEvidence,
+  ReviewVerificationCommandSuggestion,
+  StoredSyntheticQaRun,
 } from "@/lib/tauri-ipc";
 import {
   analyzeBlastRadius,
+  cancelReviewVerificationCommand,
   discardFix,
   discoverPlaywrightSpecs,
   fixFindings,
@@ -86,18 +99,24 @@ import {
   isTauriAvailable,
   listGitBranches,
   listPullRequests,
+  listReviewProcedureEvents,
   listReviews,
+  listSyntheticQaRuns,
   mergeFix,
   openInApp,
   pickDirectory,
   readFileAroundLine,
   readFilePreview,
   readRawSessionContext,
+  recordReviewProcedureEvent,
+  recordSyntheticQaRun,
   revertDiffHunk,
   revertFiles,
   runCliReview,
+  runReviewVerificationCommand,
   runSyntheticQa,
   setPreference,
+  suggestReviewVerificationCommands,
 } from "@/lib/tauri-ipc";
 import { cn } from "@/lib/utils";
 
@@ -133,6 +152,10 @@ function severityColor(s: string): string {
     default:
       return "text-slate-400 bg-slate-500/10 border-slate-500/20";
   }
+}
+
+function evidenceCandidateLabel(candidate: EvidenceCandidate): string {
+  return candidate.kind.replaceAll("_", " ");
 }
 
 function severityIcon(s: string) {
@@ -249,6 +272,17 @@ type QaRunnerType = "playwright_builtin" | "external_skill" | "repo_playwright";
 type QaAuthMode = "none" | "storage_state";
 type QaRepoTraceMode = "off" | "retain-on-failure" | "on";
 
+const evidenceCandidateStatusOptions: Array<{
+  value: EvidenceCandidateStatus;
+  label: string;
+}> = [
+  { value: "open", label: "Open" },
+  { value: "confirmed", label: "Confirmed" },
+  { value: "needs_proof", label: "Needs proof" },
+  { value: "rejected", label: "Rejected" },
+  { value: "irrelevant", label: "Irrelevant" },
+];
+
 interface FindingEvidence {
   level: EvidenceLevel;
   status: VerificationStatus;
@@ -318,6 +352,279 @@ interface QaRunHistoryEntry {
   screenshotPath: string | null;
   artifacts?: string[];
   consoleErrors: number;
+}
+
+function firstNonEmpty(values: Array<string | null | undefined>): string | undefined {
+  return values.find((value) => value != null && value.trim().length > 0)?.trim();
+}
+
+function qaRunsForReviewPrompt(runs: QaRunHistoryEntry[]): ReviewQaRunEvidence[] {
+  return runs.slice(0, 5).map((run) => ({
+    created_at: run.createdAt,
+    loop_id: run.loopId,
+    runner_type: run.runnerType,
+    base_url: run.baseUrl,
+    goal: run.goal,
+    route: run.route,
+    pass: run.pass,
+    duration_ms: run.durationMs,
+    notes: run.notes,
+    screenshot_path: run.screenshotPath,
+    artifacts: run.artifacts ?? [],
+    console_errors: run.consoleErrors,
+  }));
+}
+
+function storedSyntheticQaRunToHistory(run: StoredSyntheticQaRun): QaRunHistoryEntry {
+  return {
+    createdAt: run.created_at,
+    loopId: run.loop_id,
+    runnerType: run.runner_type,
+    baseUrl: run.base_url ?? "",
+    goal: run.goal ?? run.loop_id,
+    route: run.route ?? undefined,
+    pass: run.pass,
+    durationMs: run.duration_ms,
+    notes: run.notes ?? "",
+    screenshotPath: run.screenshot_path ?? null,
+    artifacts: run.artifacts ?? [],
+    consoleErrors: run.console_errors,
+  };
+}
+
+function browserEvidenceArtifact(evidence: BrowserEvidenceRef): string | undefined {
+  return firstNonEmpty([
+    evidence.screenshotPath,
+    evidence.qaArtifacts.split("\n")[0],
+    evidence.route,
+  ]);
+}
+
+function findingEvidenceArtifact(evidence: FindingEvidence): string | undefined {
+  return firstNonEmpty([evidence.artifact, evidence.notes.split("\n")[0]]);
+}
+
+function buildProcedureExecutionEvents(input: {
+  steps: EvidenceProcedureStep[];
+  qaRunHistory: QaRunHistoryEntry[];
+  evidenceByFinding: Record<string, FindingEvidence>;
+  browserEvidenceByFinding: Record<string, BrowserEvidenceRef>;
+  fixResult: FixFindingsResult | null;
+}): ProcedureExecutionEvent[] {
+  const events: ProcedureExecutionEvent[] = [];
+  const evidenceValues = Object.values(input.evidenceByFinding).filter(
+    (evidence) => evidence.status !== "not_checked",
+  );
+  const browserValues = Object.values(input.browserEvidenceByFinding).filter((evidence) =>
+    Boolean(browserEvidenceArtifact(evidence)),
+  );
+  const latestQa = input.qaRunHistory[0];
+
+  for (const step of input.steps) {
+    if (step.id === "verify_ui_route_change") {
+      if (latestQa) {
+        events.push({
+          stepId: step.id,
+          status: latestQa.pass ? "satisfied" : "blocked",
+          source: `qa:${latestQa.runnerType}`,
+          summary: `${latestQa.pass ? "PASS" : "FAIL"} ${latestQa.route || latestQa.loopId} (${latestQa.durationMs}ms)`,
+          artifact: firstNonEmpty([latestQa.screenshotPath, latestQa.artifacts?.[0]]),
+          createdAt: latestQa.createdAt,
+        });
+        continue;
+      }
+
+      const browserEvidence = browserValues[0];
+      if (browserEvidence) {
+        events.push({
+          stepId: step.id,
+          status: "observed",
+          source: "browser_evidence",
+          summary: browserEvidence.route
+            ? `Browser evidence attached for ${browserEvidence.route}`
+            : "Browser evidence attached to a finding",
+          artifact: browserEvidenceArtifact(browserEvidence),
+        });
+      }
+      continue;
+    }
+
+    if (step.id === "rerun_relevant_verification") {
+      const sourceEvidence = evidenceValues[0];
+      if (sourceEvidence) {
+        const fixed = evidenceValues.filter((evidence) => evidence.status === "fixed").length;
+        const notReproduced = evidenceValues.filter(
+          (evidence) => evidence.status === "not_reproduced",
+        ).length;
+        const reproduced = evidenceValues.filter(
+          (evidence) => evidence.status === "reproduced",
+        ).length;
+        events.push({
+          stepId: step.id,
+          status: reproduced > 0 ? "blocked" : "satisfied",
+          source: "finding_evidence",
+          summary: `${fixed} fixed, ${notReproduced} not reproduced, ${reproduced} reproduced`,
+          artifact: findingEvidenceArtifact(sourceEvidence),
+        });
+        continue;
+      }
+
+      if (latestQa) {
+        events.push({
+          stepId: step.id,
+          status: latestQa.pass ? "satisfied" : "blocked",
+          source: `qa:${latestQa.runnerType}`,
+          summary: `${latestQa.pass ? "PASS" : "FAIL"} ${latestQa.goal} (${latestQa.durationMs}ms)`,
+          artifact: firstNonEmpty([latestQa.screenshotPath, latestQa.artifacts?.[0]]),
+          createdAt: latestQa.createdAt,
+        });
+      }
+      continue;
+    }
+
+    if (
+      input.fixResult &&
+      [
+        "review_changed_sensitive_path",
+        "scope_control_review",
+        "inspect_generated_or_lockfile_source",
+        "inspect_blast_radius_callers",
+      ].includes(step.id)
+    ) {
+      events.push({
+        stepId: step.id,
+        status: input.fixResult.success ? "observed" : "blocked",
+        source: `fix:${input.fixResult.agent}`,
+        summary: `${input.fixResult.changed_files.length} changed file(s), ${input.fixResult.findings_fixed} finding(s) fixed`,
+        artifact: firstNonEmpty([
+          input.fixResult.worktree_path,
+          input.fixResult.changed_files[0]?.path,
+        ]),
+      });
+    }
+  }
+
+  return events;
+}
+
+function procedureEventKey(event: ProcedureExecutionEvent): string {
+  return [
+    event.stepId,
+    event.status,
+    event.source,
+    event.summary,
+    event.artifact ?? "",
+  ].join("\u0000");
+}
+
+function storedProcedureEventToExecutionEvent(
+  event: ReviewProcedureEvent,
+): ProcedureExecutionEvent {
+  return {
+    stepId: event.step_id,
+    status: event.status,
+    source: event.source,
+    summary: event.summary,
+    artifact: event.artifact ?? undefined,
+    createdAt: event.created_at,
+  };
+}
+
+function mergeProcedureExecutionEvents(
+  stored: ProcedureExecutionEvent[],
+  derived: ProcedureExecutionEvent[],
+): ProcedureExecutionEvent[] {
+  const seen = new Set<string>();
+  const merged: ProcedureExecutionEvent[] = [];
+
+  for (const event of [...stored, ...derived]) {
+    const key = procedureEventKey(event);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(event);
+  }
+
+  return merged;
+}
+
+function procedureEventTimeLabel(event: ProcedureExecutionEvent): string {
+  if (!event.createdAt) return "now";
+  const date = new Date(event.createdAt);
+  if (Number.isNaN(date.getTime())) return event.createdAt;
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function procedureEventsForQaRun(
+  steps: EvidenceProcedureStep[],
+  run: QaRunHistoryEntry,
+): ProcedureExecutionEvent[] {
+  const eventForStep = (stepId: string): ProcedureExecutionEvent | null => {
+    if (!steps.some((step) => step.id === stepId)) return null;
+    return {
+      stepId,
+      status: run.pass ? "satisfied" : "blocked",
+      source: `qa:${run.runnerType}`,
+      summary: `${run.pass ? "PASS" : "FAIL"} ${run.route || run.loopId} (${run.durationMs}ms)`,
+      artifact: firstNonEmpty([run.screenshotPath, run.artifacts?.[0]]),
+      createdAt: run.createdAt,
+    };
+  };
+
+  return [
+    eventForStep("verify_ui_route_change"),
+    eventForStep("rerun_relevant_verification"),
+  ].filter((event): event is ProcedureExecutionEvent => Boolean(event));
+}
+
+function procedureEventsForFixResult(
+  steps: EvidenceProcedureStep[],
+  result: FixFindingsResult,
+): ProcedureExecutionEvent[] {
+  const fixLinkedStepIds = [
+    "review_changed_sensitive_path",
+    "scope_control_review",
+    "inspect_generated_or_lockfile_source",
+    "inspect_blast_radius_callers",
+  ];
+
+  return steps
+    .filter((step) => fixLinkedStepIds.includes(step.id))
+    .map((step) => ({
+      stepId: step.id,
+      status: result.success ? "observed" : "blocked",
+      source: `fix:${result.agent}`,
+      summary: `${result.changed_files.length} changed file(s), ${result.findings_fixed} finding(s) fixed`,
+      artifact: firstNonEmpty([result.worktree_path, result.changed_files[0]?.path]),
+    }));
+}
+
+function procedureEventsForFindingEvidence(
+  steps: EvidenceProcedureStep[],
+  evidence: FindingEvidence,
+  finding: CliReviewFinding,
+): ProcedureExecutionEvent[] {
+  if (!steps.some((step) => step.id === "rerun_relevant_verification")) {
+    return [];
+  }
+  const artifact = findingEvidenceArtifact(evidence);
+  const summaryTarget = finding.title || finding.filePath || "selected finding";
+  const status: ProcedureExecutionEvent["status"] =
+    evidence.status === "reproduced"
+      ? "blocked"
+      : evidence.status === "fixed" || evidence.status === "not_reproduced"
+        ? "satisfied"
+        : "observed";
+
+  return [
+    {
+      stepId: "rerun_relevant_verification",
+      status,
+      source: `finding:${evidence.level}`,
+      summary: `${evidence.status.replace("_", " ")} - ${summaryTarget}`,
+      artifact,
+      createdAt: new Date().toISOString(),
+    },
+  ];
 }
 
 function isLoopbackQaBaseUrl(value: string): boolean {
@@ -553,6 +860,7 @@ export default function QuickReview() {
   const [isFixing, setIsFixing] = useState<string | null>(null);
   const [fixProgress, setFixProgress] = useState<string[]>([]);
   const [fixResult, setFixResult] = useState<FixFindingsResult | null>(null);
+  const [fixCompletedAt, setFixCompletedAt] = useState<string | null>(null);
   const fixLogRef = useRef<HTMLDivElement>(null);
   const [selectedFindings, setSelectedFindings] = useState<Set<number>>(new Set());
   const [result, setResult] = useState<CliReviewResult | null>(null);
@@ -582,7 +890,27 @@ export default function QuickReview() {
   const [codeLanguage, setCodeLanguage] = useState("");
   const [evidenceByFinding, setEvidenceByFinding] = useState<Record<string, FindingEvidence>>({});
   const [browserEvidenceByFinding, setBrowserEvidenceByFinding] = useState<Record<string, BrowserEvidenceRef>>({});
+  const [evidenceCandidateStatuses, setEvidenceCandidateStatuses] = useState<
+    Record<string, EvidenceCandidateStatus>
+  >({});
+  const [storedProcedureEvents, setStoredProcedureEvents] = useState<ReviewProcedureEvent[]>([]);
   const [packetCopied, setPacketCopied] = useState(false);
+  const reviewId = result?.review_id ?? "";
+  const activeProcedureSteps = useMemo(
+    () => result?.evidence_procedure_steps ?? [],
+    [result?.evidence_procedure_steps],
+  );
+  const [verificationCommand, setVerificationCommand] = useState("");
+  const [verificationCommandTimeoutMs, setVerificationCommandTimeoutMs] = useState(120_000);
+  const [verificationCommandRunning, setVerificationCommandRunning] = useState(false);
+  const [verificationCommandCanceling, setVerificationCommandCanceling] = useState(false);
+  const [verificationCommandRunId, setVerificationCommandRunId] = useState<string | null>(null);
+  const [verificationCommandError, setVerificationCommandError] = useState<string | null>(null);
+  const [verificationCommandSuggestions, setVerificationCommandSuggestions] = useState<
+    ReviewVerificationCommandSuggestion[]
+  >([]);
+  const [verificationCommandSuggestionsLoading, setVerificationCommandSuggestionsLoading] =
+    useState(false);
 
   // Synthetic user QA (browser loop → verification evidence)
   const [qaBaseUrl, setQaBaseUrl] = useState(CODEVETTER_REVIEW_SHELL.default_base_url);
@@ -750,6 +1078,7 @@ export default function QuickReview() {
         confidence: f.confidence ?? undefined,
       }));
       setFixResult(null);
+      setFixCompletedAt(null);
       setSelectedFindings(new Set());
       setSelectedFindingIdx(null);
       setCodeLines([]);
@@ -895,8 +1224,10 @@ export default function QuickReview() {
         projectDesc,
         changeDesc,
         "claude",
+        { qaRuns: qaRunsForReviewPrompt(qaRunHistory) },
       );
       setResult(res);
+      setFixCompletedAt(null);
       setMode("view");
       setViewHasRepoPath(true);
       setSelectedFindings(new Set());
@@ -916,7 +1247,7 @@ export default function QuickReview() {
     } finally {
       setIsReviewing(false);
     }
-  }, [repoPath, diffRange, projectDesc, changeDesc]);
+  }, [repoPath, diffRange, projectDesc, changeDesc, qaRunHistory]);
 
   // ─── Back to create mode ─────────────────────────────────────────────────
 
@@ -1038,64 +1369,79 @@ export default function QuickReview() {
     [evidenceByFinding],
   );
 
+  const procedureExecutionEvents = useMemo(
+    () => {
+      const stored = storedProcedureEvents.map(storedProcedureEventToExecutionEvent);
+      const derived = buildProcedureExecutionEvents({
+        steps: activeProcedureSteps,
+        qaRunHistory,
+        evidenceByFinding,
+        browserEvidenceByFinding,
+        fixResult,
+      });
+      return mergeProcedureExecutionEvents(stored, derived);
+    },
+    [
+      browserEvidenceByFinding,
+      evidenceByFinding,
+      fixResult,
+      qaRunHistory,
+      activeProcedureSteps,
+      storedProcedureEvents,
+    ],
+  );
+
   const reviewTimeline = useMemo(() => {
-    const items: Array<{
-      label: string;
-      detail: string;
-      status: "done" | "active" | "blocked" | "idle";
-    }> = [
-      {
-        label: "Task context",
-        detail: taskGoal.trim() ? taskGoal.trim() : "No manual goal attached",
-        status: taskGoal.trim() ? "done" : "idle",
+    return buildVerificationTimeline({
+      taskGoal,
+      review: result
+        ? {
+          findingsCount: sortedFindings.length,
+          mode: result.review_mode,
+          riskTier: result.risk_tier,
+        }
+        : null,
+      isReviewing,
+      qa: {
+        running: qaRunning,
+        latest: qaRunHistory[0] ?? null,
       },
-      {
-        label: "Review",
-        detail: result
-          ? `${sortedFindings.length} finding${sortedFindings.length !== 1 ? "s" : ""}`
-          : "No review loaded",
-        status: isReviewing ? "active" : result ? "done" : "idle",
+      evidenceCounts,
+      fixPacket: {
+        selectedFindings: fixPacket.findings.length,
+        routeAdvice: fixPacket.routeAdvice,
       },
-      {
-        label: "Evidence",
-        detail: `${evidenceCounts.reproduced} reproduced, ${evidenceCounts.fixed} fixed`,
-        status: qaRunning
-          ? "active"
-          : evidenceCounts.reproduced + evidenceCounts.fixed > 0
-            ? "done"
-            : "idle",
-      },
-      {
-        label: "Fix packet",
-        detail: `${fixPacket.findings.length} selected - ${fixPacket.routeAdvice}`,
-        status: isFixing ? "active" : fixPacket.findings.length > 0 ? "done" : "idle",
-      },
-      {
-        label: "Worktree",
-        detail: fixResult?.using_worktree === false
-          ? "Agent fell back to primary repo"
-          : fixResult?.worktree_path
+      isFixing: Boolean(isFixing),
+      fixResult: fixResult
+        ? {
+          usingWorktree: fixResult.using_worktree,
+          worktreePath: fixResult.worktree_path
             ? shortenPath(fixResult.worktree_path)
-            : "No fix run yet",
-        status: fixResult?.using_worktree === false
-          ? "blocked"
-          : fixResult?.worktree_path
-            ? "done"
-            : "idle",
-      },
-    ];
-    return items;
+            : null,
+          changedFiles: fixResult.changed_files.length,
+          findingsFixed: fixResult.findings_fixed,
+        }
+        : null,
+      history: historyContext,
+    });
   }, [
     evidenceCounts,
     fixPacket,
     fixResult,
     isFixing,
     isReviewing,
+    qaRunHistory,
     qaRunning,
     result,
+    historyContext,
     sortedFindings.length,
     taskGoal,
   ]);
+
+  const qaPostFixComparison = useMemo(
+    () => buildQaPostFixComparison(qaRunHistory, fixCompletedAt),
+    [fixCompletedAt, qaRunHistory],
+  );
 
   const uncheckedFindings = useMemo(
     () =>
@@ -1194,6 +1540,11 @@ export default function QuickReview() {
 
     return map;
   }, [historyContext, sortedFindings]);
+
+  const historyExplanations = useMemo(
+    () => buildCodebaseHistoryExplanations(historyContext),
+    [historyContext],
+  );
 
   const intentReport = useMemo(() => {
     if (!result) return null;
@@ -1305,6 +1656,16 @@ export default function QuickReview() {
     [sortedFindings],
   );
 
+  const updateEvidenceCandidateStatus = useCallback(
+    (candidateId: string, status: EvidenceCandidateStatus) => {
+      setEvidenceCandidateStatuses((prev) => ({
+        ...prev,
+        [candidateId]: status,
+      }));
+    },
+    [],
+  );
+
   const toggleRevalidationItem = useCallback(
     (idx: number, itemId: string) => {
       const finding = sortedFindings[idx];
@@ -1326,16 +1687,19 @@ export default function QuickReview() {
   );
 
   useEffect(() => {
-    if (!result?.review_id) {
+    if (!reviewId) {
       setEvidenceByFinding({});
       setBrowserEvidenceByFinding({});
+      setEvidenceCandidateStatuses({});
+      setStoredProcedureEvents([]);
       return;
     }
     void Promise.all([
-      getPreference(`quick_review_evidence_${result.review_id}`),
-      getPreference(`quick_review_browser_evidence_${result.review_id}`),
+      getPreference(`quick_review_evidence_${reviewId}`),
+      getPreference(`quick_review_browser_evidence_${reviewId}`),
+      getPreference(`quick_review_candidate_statuses_${reviewId}`),
     ])
-      .then(([raw, browserRaw]) => {
+      .then(([raw, browserRaw, candidateRaw]) => {
         if (!raw) {
           setEvidenceByFinding({});
         } else {
@@ -1357,27 +1721,81 @@ export default function QuickReview() {
             setBrowserEvidenceByFinding({});
           }
         }
+
+        if (!candidateRaw) {
+          setEvidenceCandidateStatuses({});
+        } else {
+          try {
+            setEvidenceCandidateStatuses(
+              JSON.parse(candidateRaw) as Record<string, EvidenceCandidateStatus>,
+            );
+          } catch {
+            setEvidenceCandidateStatuses({});
+          }
+        }
         return;
       })
       .catch(() => {
-          setEvidenceByFinding({});
-          setBrowserEvidenceByFinding({});
+        setEvidenceByFinding({});
+        setBrowserEvidenceByFinding({});
+        setEvidenceCandidateStatuses({});
       });
-  }, [result?.review_id]);
+  }, [reviewId]);
 
   useEffect(() => {
-    if (!result?.review_id) return;
+    if (!reviewId || !isTauriAvailable()) {
+      setStoredProcedureEvents([]);
+      return;
+    }
+
+    void listReviewProcedureEvents(reviewId)
+      .then(setStoredProcedureEvents)
+      .catch(() => setStoredProcedureEvents([]));
+  }, [reviewId]);
+
+  useEffect(() => {
+    if (!reviewId) return;
     void Promise.all([
       setPreference(
-        `quick_review_evidence_${result.review_id}`,
+        `quick_review_evidence_${reviewId}`,
         JSON.stringify(evidenceByFinding),
       ),
       setPreference(
-        `quick_review_browser_evidence_${result.review_id}`,
+        `quick_review_browser_evidence_${reviewId}`,
         JSON.stringify(browserEvidenceByFinding),
       ),
+      setPreference(
+        `quick_review_candidate_statuses_${reviewId}`,
+        JSON.stringify(evidenceCandidateStatuses),
+      ),
     ]).catch(() => {});
-  }, [browserEvidenceByFinding, evidenceByFinding, result?.review_id]);
+  }, [browserEvidenceByFinding, evidenceByFinding, evidenceCandidateStatuses, reviewId]);
+
+  const recordProcedureExecutionEvents = useCallback(
+    (events: ProcedureExecutionEvent[], metadata?: Record<string, unknown>) => {
+      if (!reviewId || !isTauriAvailable() || events.length === 0) return;
+
+      void Promise.all(
+        events.map((event) =>
+          recordReviewProcedureEvent({
+            reviewId,
+            stepId: event.stepId,
+            status: event.status,
+            source: event.source,
+            summary: event.summary,
+            artifact: event.artifact ?? null,
+            metadata,
+          }),
+        ),
+      )
+        .then((stored) => {
+          setStoredProcedureEvents((prev) => [...stored, ...prev]);
+          return null;
+        })
+        .catch(() => {});
+    },
+    [reviewId],
+  );
 
   const applyQaWorkflow = useCallback((workflow: Partial<QaWorkflowPreset>) => {
     if (workflow.baseUrl) setQaBaseUrl(workflow.baseUrl);
@@ -1610,29 +2028,88 @@ export default function QuickReview() {
   }, [currentQaWorkflow, qaActiveTargetId, qaActiveWorkflowId, qaTargets]);
 
   useEffect(() => {
-    if (!result?.review_id) {
+    if (!reviewId) {
       setQaRunHistory([]);
       return;
     }
-    void getPreference(`quick_review_qa_runs_${result.review_id}`)
-      .then((raw) => {
-        if (!raw) {
-          setQaRunHistory([]);
-          return null;
+    const loadPreferenceFallback = async () => {
+      const raw = await getPreference(`quick_review_qa_runs_${reviewId}`);
+      if (!raw) {
+        setQaRunHistory([]);
+        return;
+      }
+      setQaRunHistory(JSON.parse(raw) as QaRunHistoryEntry[]);
+    };
+
+    void (async () => {
+      try {
+        if (isTauriAvailable()) {
+          const rows = await listSyntheticQaRuns(reviewId, 8);
+          if (rows.length > 0) {
+            setQaRunHistory(rows.map(storedSyntheticQaRunToHistory));
+            return;
+          }
         }
-        setQaRunHistory(JSON.parse(raw) as QaRunHistoryEntry[]);
-        return null;
-      })
-      .catch(() => setQaRunHistory([]));
-  }, [result?.review_id]);
+        await loadPreferenceFallback();
+      } catch {
+        try {
+          await loadPreferenceFallback();
+        } catch {
+          setQaRunHistory([]);
+        }
+      }
+    })();
+  }, [reviewId]);
 
   useEffect(() => {
-    if (!result?.review_id) return;
+    if (!reviewId) return;
     void setPreference(
-      `quick_review_qa_runs_${result.review_id}`,
+      `quick_review_qa_runs_${reviewId}`,
       JSON.stringify(qaRunHistory.slice(0, 8)),
     ).catch(() => {});
-  }, [qaRunHistory, result?.review_id]);
+  }, [qaRunHistory, reviewId]);
+
+  useEffect(() => {
+    const finding =
+      selectedFindingIdx !== null ? sortedFindings[selectedFindingIdx] : null;
+    if (!repoPath || !isTauriAvailable()) {
+      setVerificationCommandSuggestions([]);
+      return;
+    }
+
+    setVerificationCommandSuggestionsLoading(true);
+    const seenHistoryCommands = new Set<string>();
+    const historyCommands = (historyContext?.command_signals ?? [])
+      .filter((signal) => signal.command.trim() && signal.status !== "stale")
+      .filter((signal) => {
+        const command = signal.command.trim();
+        if (seenHistoryCommands.has(command)) return false;
+        seenHistoryCommands.add(command);
+        return true;
+      })
+      .slice(0, 8)
+      .map((signal) => ({
+        command: signal.command.trim(),
+        date: signal.date,
+        source: signal.source,
+        status: signal.status ?? "unknown",
+        artifacts: signal.artifacts ?? [],
+      }));
+    void suggestReviewVerificationCommands({
+      repoPath,
+      changedFiles: sortedFindings
+        .map((item) => item.filePath)
+        .filter((path): path is string => Boolean(path)),
+      findingFilePath: finding?.filePath ?? null,
+      historyCommands,
+    })
+      .then((commands) => {
+        setVerificationCommandSuggestions(commands);
+        return null;
+      })
+      .catch(() => setVerificationCommandSuggestions([]))
+      .finally(() => setVerificationCommandSuggestionsLoading(false));
+  }, [historyContext, repoPath, selectedFindingIdx, sortedFindings]);
 
   const handleDiscoverQaSpecs = useCallback(async () => {
     if (!repoPath) {
@@ -1682,24 +2159,44 @@ export default function QuickReview() {
         allowRemoteTarget: qaAllowRemoteTarget,
       });
       setQaLastRun(run);
-      setQaRunHistory((prev) => [
+      let entry: QaRunHistoryEntry = {
+        createdAt: new Date().toISOString(),
+        loopId: run.loop_id,
+        runnerType: run.runner_type ?? qaRunnerType,
+        baseUrl: qaBaseUrl,
+        goal: run.goal || qaGoal,
+        route: run.route || qaTargetRoute,
+        authMode: qaAuthMode,
+        pass: run.pass,
+        durationMs: run.duration_ms,
+        notes: run.notes,
+        screenshotPath: run.screenshot_path,
+        artifacts: run.artifacts ?? [],
+        consoleErrors: run.trace?.console_errors?.length ?? 0,
+      };
+      if (reviewId) {
+        try {
+          const storedRun = await recordSyntheticQaRun({
+            reviewId,
+            repoPath,
+            baseUrl: qaBaseUrl,
+            run,
+          });
+          entry = storedSyntheticQaRunToHistory(storedRun);
+        } catch {
+          // Preference-backed history below remains the fallback if DB persistence fails.
+        }
+      }
+      setQaRunHistory((prev) => [entry, ...prev].slice(0, 8));
+      recordProcedureExecutionEvents(
+        procedureEventsForQaRun(activeProcedureSteps, entry),
         {
-          createdAt: new Date().toISOString(),
-          loopId: run.loop_id,
-          runnerType: run.runner_type ?? qaRunnerType,
-          baseUrl: qaBaseUrl,
-          goal: run.goal || qaGoal,
-          route: run.route || qaTargetRoute,
-          authMode: qaAuthMode,
-          pass: run.pass,
-          durationMs: run.duration_ms,
-          notes: run.notes,
-          screenshotPath: run.screenshot_path,
-          artifacts: run.artifacts ?? [],
-          consoleErrors: run.trace?.console_errors?.length ?? 0,
+          loopId: entry.loopId,
+          runnerType: entry.runnerType,
+          route: entry.route,
+          pass: entry.pass,
         },
-        ...prev,
-      ].slice(0, 8));
+      );
       if (!run.pass) {
         trackCoreAction("review_run");
       }
@@ -1712,6 +2209,7 @@ export default function QuickReview() {
   }, [
     qaAuthMode,
     qaAllowRemoteTarget,
+    activeProcedureSteps,
     qaBaseUrl,
     qaExternalCommand,
     qaGoal,
@@ -1721,6 +2219,8 @@ export default function QuickReview() {
     qaRunnerType,
     qaStorageStatePath,
     qaTargetRoute,
+    recordProcedureExecutionEvents,
+    reviewId,
     repoPath,
   ]);
 
@@ -1845,6 +2345,110 @@ export default function QuickReview() {
     setSelectedFindingIdx(newIdx);
   }, [qaLastRun, result]);
 
+  const handleRecordTestCommandEvent = useCallback(() => {
+    if (selectedFindingIdx === null) return;
+    const finding = sortedFindings[selectedFindingIdx];
+    if (!finding) return;
+    const evidence = {
+      ...defaultFindingEvidence,
+      ...evidenceByFinding[findingEvidenceKey(finding, selectedFindingIdx)],
+    };
+    recordProcedureExecutionEvents(
+      procedureEventsForFindingEvidence(activeProcedureSteps, evidence, finding),
+      {
+        findingTitle: finding.title,
+        findingFile: finding.filePath ?? null,
+        evidenceLevel: evidence.level,
+        evidenceStatus: evidence.status,
+        artifact: evidence.artifact || null,
+      },
+    );
+  }, [
+    activeProcedureSteps,
+    evidenceByFinding,
+    recordProcedureExecutionEvents,
+    selectedFindingIdx,
+    sortedFindings,
+  ]);
+
+  const handleRunVerificationCommand = useCallback(async () => {
+    if (!repoPath || !reviewId || selectedFindingIdx === null) return;
+    const command = verificationCommand.trim();
+    if (!command) return;
+    const finding = sortedFindings[selectedFindingIdx];
+    if (!finding) return;
+    const currentEvidence = {
+      ...defaultFindingEvidence,
+      ...evidenceByFinding[findingEvidenceKey(finding, selectedFindingIdx)],
+    };
+
+    setVerificationCommandRunning(true);
+    setVerificationCommandCanceling(false);
+    setVerificationCommandError(null);
+    const runId = `review-command-${reviewId}-${Date.now()}`;
+    setVerificationCommandRunId(runId);
+    try {
+      const run = await runReviewVerificationCommand({
+        repoPath,
+        reviewId,
+        command,
+        stepId: "rerun_relevant_verification",
+        timeoutMs: verificationCommandTimeoutMs,
+        runId,
+      });
+      setStoredProcedureEvents((prev) => [run.event, ...prev]);
+      const notes = [
+        currentEvidence.notes.trim(),
+        "",
+        `Command: ${command}`,
+        `Result: ${
+          run.passed ? "PASS" : run.canceled ? "CANCELED" : run.timed_out ? "TIMEOUT" : "FAIL"
+        } (${run.duration_ms}ms, exit ${run.exit_code})`,
+        `Artifact: ${run.artifact}`,
+        run.stderr_tail.trim() ? `stderr:\n${run.stderr_tail.trim()}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+      updateFindingEvidence(selectedFindingIdx, {
+        level: run.canceled ? currentEvidence.level : "test",
+        status: run.passed ? "not_reproduced" : run.canceled ? "not_checked" : "reproduced",
+        artifact: run.artifact,
+        notes,
+      });
+    } catch (err) {
+      setVerificationCommandError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setVerificationCommandRunning(false);
+      setVerificationCommandCanceling(false);
+      setVerificationCommandRunId(null);
+    }
+  }, [
+    evidenceByFinding,
+    repoPath,
+    reviewId,
+    selectedFindingIdx,
+    sortedFindings,
+    updateFindingEvidence,
+    verificationCommand,
+    verificationCommandTimeoutMs,
+  ]);
+
+  const handleCancelVerificationCommand = useCallback(async () => {
+    if (!verificationCommandRunId) return;
+    setVerificationCommandCanceling(true);
+    try {
+      const result = await cancelReviewVerificationCommand(verificationCommandRunId);
+      if (!result.canceled) {
+        setVerificationCommandError("Command already finished.");
+      }
+    } catch (err) {
+      setVerificationCommandError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setVerificationCommandCanceling(false);
+    }
+  }, [verificationCommandRunId]);
+
   // ─── Fix handlers ───────────────────────────────────────────────────────
 
   const toggleFinding = useCallback((idx: number) => {
@@ -1869,6 +2473,7 @@ export default function QuickReview() {
     if (!repoPath || !result || selectedFindings.size === 0) return;
     setIsFixing("selected");
     setFixResult(null);
+    setFixCompletedAt(null);
     setFixProgress([]);
     setError(null);
 
@@ -1894,13 +2499,30 @@ export default function QuickReview() {
     try {
       const res = await fixFindings(repoPath, fixPacket.findings, result.agent);
       setFixResult(res);
+      setFixCompletedAt(new Date().toISOString());
+      recordProcedureExecutionEvents(
+        procedureEventsForFixResult(activeProcedureSteps, res),
+        {
+          agent: res.agent,
+          changedFiles: res.changed_files.length,
+          findingsFixed: res.findings_fixed,
+          usingWorktree: res.using_worktree ?? null,
+        },
+      );
     } catch (e) {
       setError(`Fix failed: ${String(e)}`);
     } finally {
       setIsFixing(null);
       unlisten?.();
     }
-  }, [fixPacket.findings, repoPath, result, selectedFindings.size]);
+  }, [
+    activeProcedureSteps,
+    fixPacket.findings,
+    repoPath,
+    recordProcedureExecutionEvents,
+    result,
+    selectedFindings.size,
+  ]);
 
   const handleRevertFile = useCallback(async (filePath: string) => {
     if (!fixResult?.worktree_path) return;
@@ -1929,6 +2551,7 @@ export default function QuickReview() {
     try {
       await mergeFix(repoPath, fixResult.worktree_branch, fixResult.worktree_path);
       setFixResult(null);
+      setFixCompletedAt(null);
     } catch (e) {
       setError(`Merge failed: ${String(e)}`);
     }
@@ -1939,6 +2562,7 @@ export default function QuickReview() {
     try {
       await discardFix(repoPath, fixResult.worktree_branch, fixResult.worktree_path);
       setFixResult(null);
+      setFixCompletedAt(null);
     } catch (e) {
       setError(`Discard failed: ${String(e)}`);
     }
@@ -1956,6 +2580,7 @@ export default function QuickReview() {
       const msg = `fix: resolve ${fixResult.findings_fixed} code review finding${fixResult.findings_fixed !== 1 ? "s" : ""}`;
       await safeInvoke("run_git_command", { repoPath, args: ["commit", "-m", msg] }).catch(() => {});
       setFixResult(null);
+      setFixCompletedAt(null);
       setError(null);
     } catch (e) {
       // Fallback: just tell the user to commit manually
@@ -1984,6 +2609,12 @@ export default function QuickReview() {
         ...defaultFindingEvidence,
         ...evidenceByFinding[findingEvidenceKey(finding, idx)],
       }));
+    const activeFindingForProof =
+      selectedFindingIdx !== null ? sortedFindings[selectedFindingIdx] : null;
+    const focusedReviewMemoryGraph = buildFocusedReviewMemoryGraph(
+      result.review_memory_graph,
+      activeFindingForProof,
+    );
     const markdown = buildReviewerProofMarkdown({
       diffRange: result.diff_range,
       score: result.score,
@@ -1991,6 +2622,15 @@ export default function QuickReview() {
       findings: sortedFindings,
       evidence,
       evidenceCounts,
+      evidenceCandidates: result.evidence_candidates,
+      evidenceCandidateStatuses,
+      evidenceProcedureSteps: result.evidence_procedure_steps,
+      reviewMemoryGraph: result.review_memory_graph,
+      focusedReviewMemoryGraph,
+      verificationTimeline: reviewTimeline,
+      qaPostFixComparison,
+      historyExplanations,
+      procedureExecutionEvents,
       intentReport,
       historyFindingSummaries,
     });
@@ -2005,10 +2645,16 @@ export default function QuickReview() {
   }, [
     result,
     sortedFindings,
+    selectedFindingIdx,
     evidenceCounts,
     evidenceByFinding,
+    evidenceCandidateStatuses,
     intentReport,
+    procedureExecutionEvents,
+    qaPostFixComparison,
+    reviewTimeline,
     historyFindingSummaries,
+    historyExplanations,
   ]);
 
   const handleCopyFixPacket = useCallback(async () => {
@@ -2038,6 +2684,7 @@ export default function QuickReview() {
 
   const handleReReview = useCallback(() => {
     setFixResult(null);
+    setFixCompletedAt(null);
     setSelectedFindings(new Set());
     setSelectedFindingIdx(null);
     setCodeLines([]);
@@ -2139,6 +2786,19 @@ export default function QuickReview() {
           ...browserEvidenceByFinding[findingEvidenceKey(activeFinding, selectedFindingIdx)],
         }
         : emptyBrowserEvidence();
+    const evidenceCandidates = result.evidence_candidates ?? [];
+    const evidenceProcedureSteps = result.evidence_procedure_steps ?? [];
+    const reviewMemoryGraph = result.review_memory_graph;
+    const focusedReviewMemoryGraph = buildFocusedReviewMemoryGraph(
+      reviewMemoryGraph,
+      activeFinding,
+    );
+    const procedureEventsByStep = procedureExecutionEvents.reduce<
+      Record<string, ProcedureExecutionEvent[]>
+    >((acc, event) => {
+      acc[event.stepId] = [...(acc[event.stepId] ?? []), event];
+      return acc;
+    }, {});
 
     return (
       <div className="flex h-full flex-col px-4 pb-4 pt-20">
@@ -2916,6 +3576,52 @@ export default function QuickReview() {
                         </ul>
                       </div>
                     )}
+                    {qaPostFixComparison && (
+                      <div
+                        className={cn(
+                          "mt-3 rounded-lg border p-2 text-[10px] leading-4",
+                          qaPostFixComparison.status === "fixed" ||
+                            qaPostFixComparison.status === "still_passing"
+                            ? "border-emerald-500/20 bg-emerald-500/[0.04] text-emerald-300"
+                            : qaPostFixComparison.status === "needs_rerun"
+                              ? "border-yellow-500/20 bg-yellow-500/[0.04] text-yellow-300"
+                              : "border-red-500/20 bg-red-500/[0.04] text-red-300",
+                        )}
+                      >
+                        <div className="font-mono uppercase tracking-wider">
+                          Post-fix QA · {qaPostFixComparison.status.replace("_", " ")}
+                        </div>
+                        <p className="mt-1 text-slate-400">
+                          {qaPostFixComparison.summary}
+                        </p>
+                        <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+                          <div className="rounded border border-[var(--cv-line)] bg-[#050505] px-2 py-1.5">
+                            <div className="font-mono uppercase text-slate-500">Before</div>
+                            <div>
+                              {qaPostFixComparison.before.pass ? "PASS" : "FAIL"} ·{" "}
+                              {qaPostFixComparison.before.durationMs}ms
+                              {qaPostFixComparison.before.route
+                                ? ` · ${qaPostFixComparison.before.route}`
+                                : ""}
+                            </div>
+                          </div>
+                          <div className="rounded border border-[var(--cv-line)] bg-[#050505] px-2 py-1.5">
+                            <div className="font-mono uppercase text-slate-500">After</div>
+                            {qaPostFixComparison.after ? (
+                              <div>
+                                {qaPostFixComparison.after.pass ? "PASS" : "FAIL"} ·{" "}
+                                {qaPostFixComparison.after.durationMs}ms
+                                {qaPostFixComparison.after.route
+                                  ? ` · ${qaPostFixComparison.after.route}`
+                                  : ""}
+                              </div>
+                            ) : (
+                              <div>Not run yet</div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                   {selectedFindingIdx !== null && (
                     <div className="mt-6 border-t border-[var(--cv-line)] pt-5">
@@ -2988,6 +3694,130 @@ export default function QuickReview() {
                           className="w-full resize-none rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-2 text-xs leading-5 text-slate-200 outline-none placeholder:text-slate-700 focus:border-[var(--cv-accent)]"
                         />
                       </label>
+                      <div className="mt-3 rounded-lg border border-[var(--cv-line)] bg-[#050505] p-2">
+                        <label className="block space-y-1">
+                          <span className="cv-label">Local test command</span>
+                          <input
+                            value={verificationCommand}
+                            onChange={(event) => setVerificationCommand(event.target.value)}
+                            placeholder="npm run test:review-proof"
+                            className="w-full rounded-lg border border-[var(--cv-line)] bg-[#07080a] px-2 py-2 font-mono text-xs text-slate-200 outline-none placeholder:text-slate-700 focus:border-[var(--cv-accent)]"
+                          />
+                        </label>
+                        {verificationCommandSuggestions.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {verificationCommandSuggestions.slice(0, 4).map((suggestion) => (
+                              <button
+                                key={suggestion.command}
+                                type="button"
+                                className="max-w-full truncate rounded border border-[var(--cv-line)] px-2 py-1 font-mono text-[10px] text-slate-400 hover:border-[var(--cv-accent)] hover:text-slate-200"
+                                title={[
+                                  suggestion.reason,
+                                  suggestion.source ? `source: ${suggestion.source}` : null,
+                                  typeof suggestion.score === "number"
+                                    ? `score: ${suggestion.score}`
+                                    : null,
+                                ]
+                                  .filter(Boolean)
+                                  .join(" · ")}
+                                onClick={() => setVerificationCommand(suggestion.command)}
+                              >
+                                {suggestion.command}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {verificationCommandSuggestionsLoading && (
+                          <p className="mt-1 text-[10px] text-slate-600">
+                            Finding command suggestions…
+                          </p>
+                        )}
+                        <div className="mt-2 flex items-center gap-2">
+                          <label className="flex shrink-0 items-center gap-1 text-[10px] text-slate-600">
+                            <span>Timeout</span>
+                            <input
+                              type="number"
+                              min={1}
+                              max={600}
+                              value={Math.round(verificationCommandTimeoutMs / 1000)}
+                              onChange={(event) =>
+                                setVerificationCommandTimeoutMs(
+                                  Math.max(1, Math.min(600, Number(event.target.value) || 120)) *
+                                    1000,
+                                )
+                              }
+                              className="h-7 w-16 rounded border border-[var(--cv-line)] bg-[#07080a] px-1.5 font-mono text-[10px] text-slate-300 outline-none focus:border-[var(--cv-accent)]"
+                            />
+                            <span>s</span>
+                          </label>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-7 border-[var(--cv-line)] px-2 text-[10px]"
+                            disabled={
+                              verificationCommandRunning ||
+                              !repoPath ||
+                              !verificationCommand.trim()
+                            }
+                            onClick={() => void handleRunVerificationCommand()}
+                            title="Run this local command and capture its output as procedure evidence"
+                          >
+                            {verificationCommandRunning ? (
+                              <Loader2 size={12} className="animate-spin" />
+                            ) : (
+                              <RefreshCw size={12} />
+                            )}
+                            Run command
+                          </Button>
+                          {verificationCommandRunning && verificationCommandRunId && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 border-red-500/40 px-2 text-[10px] text-red-300 hover:border-red-400"
+                              disabled={verificationCommandCanceling}
+                              onClick={() => void handleCancelVerificationCommand()}
+                              title="Cancel the running local verification command"
+                            >
+                              {verificationCommandCanceling ? (
+                                <Loader2 size={12} className="animate-spin" />
+                              ) : (
+                                <X size={12} />
+                              )}
+                              Cancel
+                            </Button>
+                          )}
+                          <span className="min-w-0 truncate text-[10px] text-slate-600">
+                            Captures stdout/stderr to a log artifact
+                          </span>
+                        </div>
+                        {verificationCommandError && (
+                          <p className="mt-2 text-[10px] text-red-400">
+                            {verificationCommandError}
+                          </p>
+                        )}
+                      </div>
+                      <div className="mt-3 flex items-center gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-7 border-[var(--cv-line)] px-2 text-[10px]"
+                          disabled={
+                            activeEvidence.status === "not_checked" ||
+                            (!activeEvidence.artifact.trim() && !activeEvidence.notes.trim())
+                          }
+                          onClick={handleRecordTestCommandEvent}
+                          title="Record this evidence as a durable procedure event"
+                        >
+                          <ClipboardCheck size={12} />
+                          Record test event
+                        </Button>
+                        <span className="min-w-0 truncate text-[10px] text-slate-600">
+                          Links selected evidence to verification gates
+                        </span>
+                      </div>
                       <div className="mt-4 rounded-lg border border-[var(--cv-line)] bg-[#050505] p-3">
                         <div className="mb-2 flex items-center gap-2">
                           <MonitorPlay size={13} className="text-[var(--cv-accent)]" />
@@ -3414,11 +4244,365 @@ export default function QuickReview() {
                       <span className="block truncate text-[10px] text-slate-600">
                         {item.detail}
                       </span>
+                      {item.anchors && item.anchors.length > 0 && (
+                        <span className="mt-1 block space-y-0.5">
+                          {item.anchors.slice(0, 2).map((anchor) => (
+                            <span
+                              key={anchor.id}
+                              className="block truncate font-mono text-[9px] text-slate-500"
+                              title={[
+                                anchor.source,
+                                anchor.sourcePath,
+                                anchor.sourceLine != null ? `line ${anchor.sourceLine}` : null,
+                                anchor.eventId,
+                              ]
+                                .filter(Boolean)
+                                .join(" · ")}
+                            >
+                              {anchor.status ?? "unknown"} · {anchor.label}
+                            </span>
+                          ))}
+                        </span>
+                      )}
                     </span>
                   </div>
                 ))}
               </div>
             </div>
+
+            {reviewMemoryGraph && reviewMemoryGraph.nodes.length > 0 && (
+              <div className="shrink-0 border-t border-[var(--cv-line)] bg-[#07080a] px-3 py-2">
+                <div className="mb-2 flex items-center gap-2">
+                  <GitBranch size={12} className="shrink-0 text-cyan-300" />
+                  <span className="cv-label min-w-0 flex-1 truncate text-slate-300">
+                    Review memory graph · {reviewMemoryGraph.nodes.length} nodes
+                  </span>
+                  {reviewMemoryGraph.truncated && (
+                    <Badge variant="outline" className="rounded-full px-1.5 py-0 text-[9px]">
+                      capped
+                    </Badge>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {reviewMemoryGraph.nodes.slice(0, 5).map((node) => (
+                    <div
+                      key={node.id}
+                      className="rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-1.5"
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="shrink-0 rounded bg-cyan-500/10 px-1.5 py-0.5 text-[9px] text-cyan-200">
+                          {node.kind}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-slate-300">
+                          {node.label}
+                        </span>
+                      </div>
+                      {node.detail && (
+                        <p className="mt-1 line-clamp-1 text-[10px] text-slate-500">
+                          {node.detail}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {reviewMemoryGraph.edges.length > 0 && (
+                  <div className="mt-2 font-mono text-[9px] text-slate-600">
+                    {reviewMemoryGraph.edges.slice(0, 3).map((edge) => (
+                      <div key={`${edge.from}-${edge.kind}-${edge.to}`} className="truncate">
+                        {edge.from} {"->"} {edge.to} · {edge.kind}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {focusedReviewMemoryGraph && focusedReviewMemoryGraph.nodes.length > 0 && (
+              <div className="shrink-0 border-t border-[var(--cv-line)] bg-[#07080a] px-3 py-2">
+                <div className="mb-2 flex items-center gap-2">
+                  <GitBranch size={12} className="shrink-0 text-emerald-300" />
+                  <span className="cv-label min-w-0 flex-1 truncate text-slate-300">
+                    Finding graph focus · {focusedReviewMemoryGraph.nodes.length} nodes
+                  </span>
+                  {focusedReviewMemoryGraph.truncated && (
+                    <Badge variant="outline" className="rounded-full px-1.5 py-0 text-[9px]">
+                      capped
+                    </Badge>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {focusedReviewMemoryGraph.nodes.slice(0, 4).map((node) => (
+                    <div
+                      key={node.id}
+                      className="rounded-lg border border-emerald-500/20 bg-[#050505] px-2 py-1.5"
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[9px] text-emerald-200">
+                          {node.kind}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-slate-300">
+                          {node.label}
+                        </span>
+                      </div>
+                      {node.detail && (
+                        <p className="mt-1 line-clamp-1 text-[10px] text-slate-500">
+                          {node.detail}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {focusedReviewMemoryGraph.edges.length > 0 && (
+                  <div className="mt-2 font-mono text-[9px] text-slate-600">
+                    {focusedReviewMemoryGraph.edges.slice(0, 3).map((edge) => (
+                      <div key={`${edge.from}-${edge.kind}-${edge.to}`} className="truncate">
+                        {edge.from} {"->"} {edge.to} · {edge.kind}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {historyExplanations.length > 0 && (
+              <div className="shrink-0 border-t border-[var(--cv-line)] bg-[#07080a] px-3 py-2">
+                <div className="mb-2 flex items-center gap-2">
+                  <History size={12} className="shrink-0 text-amber-300" />
+                  <span className="cv-label min-w-0 flex-1 truncate text-slate-300">
+                    Why this code exists · {historyExplanations.length}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {historyExplanations.slice(0, 3).map((explanation) => (
+                    <div
+                      key={explanation.file}
+                      className="rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-1.5"
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-slate-300">
+                          {explanation.file}
+                        </span>
+                        <Badge
+                          variant="outline"
+                          className="shrink-0 rounded-full px-1.5 py-0 text-[9px] text-slate-500"
+                        >
+                          {explanation.confidence}
+                        </Badge>
+                      </div>
+                      <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-500">
+                        {explanation.summary}
+                      </p>
+                      {explanation.citations[0] && (
+                        <p className="mt-1 truncate font-mono text-[9px] text-slate-600">
+                          {explanation.citations[0]}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {evidenceCandidates.length > 0 && (
+              <div className="shrink-0 border-t border-[var(--cv-line)] bg-[#07080a] px-3 py-2">
+                <div className="mb-2 flex items-center gap-2">
+                  <AlertTriangle size={12} className="shrink-0 text-yellow-400" />
+                  <span className="cv-label min-w-0 flex-1 truncate text-slate-300">
+                    Evidence candidates · {evidenceCandidates.length}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {evidenceCandidates.slice(0, 4).map((candidate) => {
+                    const candidateStatus =
+                      evidenceCandidateStatuses[candidate.id] ?? "open";
+
+                    return (
+                      <div
+                        key={candidate.id}
+                        className="rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-1.5"
+                      >
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "shrink-0 rounded-full px-1.5 py-0 font-mono text-[9px] uppercase",
+                              severityColor(candidate.severity_hint),
+                            )}
+                          >
+                            {candidate.severity_hint}
+                          </Badge>
+                          <span className="min-w-0 flex-1 truncate text-[10px] text-slate-300">
+                            {evidenceCandidateLabel(candidate)}
+                          </span>
+                          <span className="shrink-0 font-mono text-[9px] text-slate-600">
+                            {Math.round(candidate.confidence * 100)}%
+                          </span>
+                        </div>
+                        <label className="mt-1.5 block space-y-1">
+                          <span className="sr-only">Candidate status</span>
+                          <select
+                            value={candidateStatus}
+                            onChange={(event) =>
+                              updateEvidenceCandidateStatus(
+                                candidate.id,
+                                event.target.value as EvidenceCandidateStatus,
+                              )
+                            }
+                            className="w-full rounded border border-[var(--cv-line)] bg-[#050505] px-1.5 py-1 text-[10px] text-slate-300 outline-none focus:border-[var(--cv-accent)]"
+                          >
+                            {evidenceCandidateStatusOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-500">
+                          {candidate.why_it_matters}
+                        </p>
+                        {candidate.open_questions.length > 0 && (
+                          <p className="mt-1 line-clamp-1 text-[10px] leading-4 text-yellow-300/80">
+                            {candidate.open_questions[0]}
+                          </p>
+                        )}
+                        {candidate.evidence_refs.length > 0 && (
+                          <p
+                            className="mt-1 truncate font-mono text-[9px] text-slate-500"
+                            title={
+                              candidate.evidence_refs[0].detail ??
+                              candidate.evidence_refs[0].label
+                            }
+                          >
+                            {candidate.evidence_refs[0].kind}:{" "}
+                            {candidate.evidence_refs[0].label}
+                          </p>
+                        )}
+                        {candidate.affected_files.length > 0 && (
+                          <p className="mt-1 truncate font-mono text-[9px] text-slate-600">
+                            {candidate.affected_files.slice(0, 3).join(", ")}
+                            {candidate.affected_files.length > 3
+                              ? ` (+${candidate.affected_files.length - 3})`
+                              : ""}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {evidenceProcedureSteps.length > 0 && (
+              <div className="shrink-0 border-t border-[var(--cv-line)] bg-[#07080a] px-3 py-2">
+                <div className="mb-2 flex items-center gap-2">
+                  <ClipboardCheck size={12} className="shrink-0 text-cyan-300" />
+                  <span className="cv-label min-w-0 flex-1 truncate text-slate-300">
+                    Procedure gates · {evidenceProcedureSteps.length}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {evidenceProcedureSteps.slice(0, 4).map((step) => {
+                    const linkedEvents = procedureEventsByStep[step.id] ?? [];
+                    const effectiveStatus =
+                      linkedEvents.find((event) => event.status === "satisfied")?.status ??
+                      linkedEvents.find((event) => event.status === "blocked")?.status ??
+                      linkedEvents[0]?.status ??
+                      step.status;
+
+                    return (
+                      <div
+                        key={step.id}
+                        className="rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-1.5"
+                      >
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span
+                            className={cn(
+                              "h-1.5 w-1.5 shrink-0 rounded-full",
+                              effectiveStatus === "blocked"
+                                ? "bg-yellow-400"
+                                : effectiveStatus === "satisfied"
+                                  ? "bg-emerald-400"
+                                  : "bg-cyan-300",
+                            )}
+                          />
+                          <span className="min-w-0 flex-1 truncate text-[10px] text-slate-300">
+                            {step.procedure.replaceAll("_", " ")}
+                          </span>
+                          <span className="shrink-0 font-mono text-[9px] uppercase text-slate-600">
+                            {effectiveStatus}
+                          </span>
+                        </div>
+                        <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-500">
+                          {step.gate}
+                        </p>
+                        <p className="mt-1 truncate font-mono text-[9px] text-slate-600">
+                          artifact: {step.artifact}
+                        </p>
+                        {linkedEvents.slice(0, 2).map((event) => (
+                          <p
+                            key={`${event.source}-${event.summary}`}
+                            className="mt-1 truncate text-[10px] leading-4 text-cyan-300/80"
+                          >
+                            {event.source}: {event.summary}
+                          </p>
+                        ))}
+                        {linkedEvents.length === 0 && step.blocked_on.length > 0 && (
+                          <p className="mt-1 truncate text-[10px] leading-4 text-yellow-300/80">
+                            blocked on: {step.blocked_on.join(", ")}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {procedureExecutionEvents.length > 0 && (
+              <div className="shrink-0 border-t border-[var(--cv-line)] bg-[#07080a] px-3 py-2">
+                <div className="mb-2 flex items-center gap-2">
+                  <History size={12} className="shrink-0 text-cyan-300" />
+                  <span className="cv-label min-w-0 flex-1 truncate text-slate-300">
+                    Procedure event timeline · {procedureExecutionEvents.length}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {procedureExecutionEvents.slice(0, 8).map((event) => (
+                    <div
+                      key={procedureEventKey(event)}
+                      className="rounded-lg border border-[var(--cv-line)] bg-[#050505] px-2 py-1.5"
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span
+                          className={cn(
+                            "h-1.5 w-1.5 shrink-0 rounded-full",
+                            event.status === "blocked"
+                              ? "bg-yellow-400"
+                              : event.status === "satisfied"
+                                ? "bg-emerald-400"
+                                : "bg-cyan-300",
+                          )}
+                        />
+                        <span className="min-w-0 flex-1 truncate font-mono text-[9px] text-slate-500">
+                          {procedureEventTimeLabel(event)} · {event.source}
+                        </span>
+                        <span className="shrink-0 font-mono text-[9px] uppercase text-slate-600">
+                          {event.status}
+                        </span>
+                      </div>
+                      <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-400">
+                        {event.summary}
+                      </p>
+                      {event.artifact && (
+                        <p className="mt-1 truncate font-mono text-[9px] text-slate-600">
+                          {event.artifact}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Intent-level verification gaps */}
             {intentReport && (

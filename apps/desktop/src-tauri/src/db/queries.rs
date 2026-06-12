@@ -64,6 +64,58 @@ pub struct LocalReviewFindingRow {
     pub fingerprint: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewProcedureEventRow {
+    pub id: String,
+    pub review_id: String,
+    pub step_id: String,
+    pub status: String,
+    pub source: String,
+    pub summary: String,
+    pub artifact: Option<String>,
+    pub metadata: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyntheticQaRunRow {
+    pub id: String,
+    pub review_id: Option<String>,
+    pub repo_path: Option<String>,
+    pub loop_id: String,
+    pub runner_type: String,
+    pub base_url: Option<String>,
+    pub route: Option<String>,
+    pub goal: Option<String>,
+    pub pass: bool,
+    pub duration_ms: i64,
+    pub notes: Option<String>,
+    pub screenshot_path: Option<String>,
+    pub artifacts: Vec<String>,
+    pub console_errors: i64,
+    pub error: Option<String>,
+    pub trace_json: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionAdapterRunRow {
+    pub id: String,
+    pub project: Option<String>,
+    pub adapter_id: String,
+    pub agent_type: Option<String>,
+    pub source_roots: Vec<String>,
+    pub sample_source_paths: Vec<String>,
+    pub evidence_archive: String,
+    pub sessions_indexed: i64,
+    pub messages_indexed: i64,
+    pub last_indexed_at: Option<String>,
+    pub sample_session_ids: Vec<String>,
+    pub parse_warnings: Vec<String>,
+    pub supports_incremental: bool,
+    pub created_at: String,
+}
+
 /// Lightweight row for history signals — recurring failures from past reviews on a repo.
 /// Used by git history mining (no full finding payload needed).
 #[derive(Debug, Clone)]
@@ -173,6 +225,52 @@ pub struct LocalReviewFindingInput {
     pub line: Option<i64>,
     pub confidence: Option<f64>,
     pub fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewProcedureEventInput {
+    pub review_id: String,
+    pub step_id: String,
+    pub status: String,
+    pub source: String,
+    pub summary: String,
+    pub artifact: Option<String>,
+    pub metadata: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyntheticQaRunInput {
+    pub review_id: Option<String>,
+    pub repo_path: Option<String>,
+    pub loop_id: String,
+    pub runner_type: String,
+    pub base_url: Option<String>,
+    pub route: Option<String>,
+    pub goal: Option<String>,
+    pub pass: bool,
+    pub duration_ms: i64,
+    pub notes: Option<String>,
+    pub screenshot_path: Option<String>,
+    pub artifacts: Vec<String>,
+    pub console_errors: i64,
+    pub error: Option<String>,
+    pub trace_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionAdapterRunInput {
+    pub project: Option<String>,
+    pub adapter_id: String,
+    pub agent_type: Option<String>,
+    pub source_roots: Vec<String>,
+    pub sample_source_paths: Vec<String>,
+    pub evidence_archive: String,
+    pub sessions_indexed: i64,
+    pub messages_indexed: i64,
+    pub last_indexed_at: Option<String>,
+    pub sample_session_ids: Vec<String>,
+    pub parse_warnings: Vec<String>,
+    pub supports_incremental: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,6 +485,109 @@ pub fn upsert_session(conn: &Connection, s: &SessionInput) -> Result<(), rusqlit
     Ok(())
 }
 
+pub fn insert_session_adapter_run(
+    conn: &Connection,
+    input: &SessionAdapterRunInput,
+) -> Result<SessionAdapterRunRow, rusqlite::Error> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let source_roots_json =
+        serde_json::to_string(&input.source_roots).unwrap_or_else(|_| "[]".to_string());
+    let sample_source_paths_json =
+        serde_json::to_string(&input.sample_source_paths).unwrap_or_else(|_| "[]".to_string());
+    let sample_session_ids_json =
+        serde_json::to_string(&input.sample_session_ids).unwrap_or_else(|_| "[]".to_string());
+    let parse_warnings_json =
+        serde_json::to_string(&input.parse_warnings).unwrap_or_else(|_| "[]".to_string());
+
+    conn.execute(
+        "INSERT INTO session_adapter_runs (
+            id, project, adapter_id, agent_type, source_roots_json,
+            sample_source_paths_json, evidence_archive, sessions_indexed,
+            messages_indexed, last_indexed_at, sample_session_ids_json,
+            parse_warnings_json, supports_incremental, created_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+        params![
+            id,
+            input.project.as_deref(),
+            input.adapter_id.as_str(),
+            input.agent_type.as_deref(),
+            source_roots_json,
+            sample_source_paths_json,
+            input.evidence_archive.as_str(),
+            input.sessions_indexed,
+            input.messages_indexed,
+            input.last_indexed_at.as_deref(),
+            sample_session_ids_json,
+            parse_warnings_json,
+            if input.supports_incremental { 1 } else { 0 },
+            now,
+        ],
+    )?;
+
+    get_session_adapter_run(conn, &id)
+}
+
+fn parse_json_string_vec(raw: Option<String>) -> Vec<String> {
+    raw.and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+        .unwrap_or_default()
+}
+
+fn session_adapter_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionAdapterRunRow> {
+    Ok(SessionAdapterRunRow {
+        id: row.get(0)?,
+        project: row.get(1)?,
+        adapter_id: row.get(2)?,
+        agent_type: row.get(3)?,
+        source_roots: parse_json_string_vec(row.get(4)?),
+        sample_source_paths: parse_json_string_vec(row.get(5)?),
+        evidence_archive: row.get(6)?,
+        sessions_indexed: row.get(7)?,
+        messages_indexed: row.get(8)?,
+        last_indexed_at: row.get(9)?,
+        sample_session_ids: parse_json_string_vec(row.get(10)?),
+        parse_warnings: parse_json_string_vec(row.get(11)?),
+        supports_incremental: row.get::<_, i64>(12)? != 0,
+        created_at: row.get(13)?,
+    })
+}
+
+pub fn get_session_adapter_run(
+    conn: &Connection,
+    id: &str,
+) -> Result<SessionAdapterRunRow, rusqlite::Error> {
+    conn.query_row(
+        "SELECT id, project, adapter_id, agent_type, source_roots_json,
+                sample_source_paths_json, evidence_archive, sessions_indexed,
+                messages_indexed, last_indexed_at, sample_session_ids_json,
+                parse_warnings_json, supports_incremental, created_at
+         FROM session_adapter_runs
+         WHERE id = ?1",
+        params![id],
+        session_adapter_run_from_row,
+    )
+}
+
+pub fn list_session_adapter_runs(
+    conn: &Connection,
+    project: Option<&str>,
+    limit: i64,
+) -> Result<Vec<SessionAdapterRunRow>, rusqlite::Error> {
+    let limit = limit.clamp(1, 200);
+    let mut stmt = conn.prepare(
+        "SELECT id, project, adapter_id, agent_type, source_roots_json,
+                sample_source_paths_json, evidence_archive, sessions_indexed,
+                messages_indexed, last_indexed_at, sample_session_ids_json,
+                parse_warnings_json, supports_incremental, created_at
+         FROM session_adapter_runs
+         WHERE (?1 IS NULL OR project = ?1)
+         ORDER BY datetime(created_at) DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![project, limit], session_adapter_run_from_row)?;
+    rows.collect()
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Session day buckets
 // ─────────────────────────────────────────────────────────────────
@@ -502,6 +703,173 @@ pub fn insert_review_finding(
         ],
     )?;
     Ok(id)
+}
+
+pub fn insert_review_procedure_event(
+    conn: &Connection,
+    input: &ReviewProcedureEventInput,
+) -> Result<ReviewProcedureEventRow, rusqlite::Error> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO review_procedure_events (
+            id, review_id, step_id, status, source, summary,
+            artifact, metadata, created_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            id,
+            input.review_id,
+            input.step_id,
+            input.status,
+            input.source,
+            input.summary,
+            input.artifact,
+            input.metadata,
+            now,
+        ],
+    )?;
+
+    Ok(ReviewProcedureEventRow {
+        id,
+        review_id: input.review_id.clone(),
+        step_id: input.step_id.clone(),
+        status: input.status.clone(),
+        source: input.source.clone(),
+        summary: input.summary.clone(),
+        artifact: input.artifact.clone(),
+        metadata: input.metadata.clone(),
+        created_at: now,
+    })
+}
+
+pub fn list_review_procedure_events(
+    conn: &Connection,
+    review_id: &str,
+) -> Result<Vec<ReviewProcedureEventRow>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, review_id, step_id, status, source, summary,
+                artifact, metadata, created_at
+         FROM review_procedure_events
+         WHERE review_id = ?1
+         ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map(params![review_id], |row| {
+        Ok(ReviewProcedureEventRow {
+            id: row.get(0)?,
+            review_id: row.get(1)?,
+            step_id: row.get(2)?,
+            status: row.get(3)?,
+            source: row.get(4)?,
+            summary: row.get(5)?,
+            artifact: row.get(6)?,
+            metadata: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn insert_synthetic_qa_run(
+    conn: &Connection,
+    input: &SyntheticQaRunInput,
+) -> Result<SyntheticQaRunRow, rusqlite::Error> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let artifacts_json =
+        serde_json::to_string(&input.artifacts).unwrap_or_else(|_| "[]".to_string());
+    conn.execute(
+        "INSERT INTO synthetic_qa_runs (
+            id, review_id, repo_path, loop_id, runner_type, base_url,
+            route, goal, pass, duration_ms, notes, screenshot_path,
+            artifacts, console_errors, error, trace_json, created_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+        params![
+            id,
+            input.review_id,
+            input.repo_path,
+            input.loop_id,
+            input.runner_type,
+            input.base_url,
+            input.route,
+            input.goal,
+            if input.pass { 1 } else { 0 },
+            input.duration_ms,
+            input.notes,
+            input.screenshot_path,
+            artifacts_json,
+            input.console_errors,
+            input.error,
+            input.trace_json,
+            now,
+        ],
+    )?;
+
+    Ok(SyntheticQaRunRow {
+        id,
+        review_id: input.review_id.clone(),
+        repo_path: input.repo_path.clone(),
+        loop_id: input.loop_id.clone(),
+        runner_type: input.runner_type.clone(),
+        base_url: input.base_url.clone(),
+        route: input.route.clone(),
+        goal: input.goal.clone(),
+        pass: input.pass,
+        duration_ms: input.duration_ms,
+        notes: input.notes.clone(),
+        screenshot_path: input.screenshot_path.clone(),
+        artifacts: input.artifacts.clone(),
+        console_errors: input.console_errors,
+        error: input.error.clone(),
+        trace_json: input.trace_json.clone(),
+        created_at: now,
+    })
+}
+
+fn synthetic_qa_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SyntheticQaRunRow> {
+    let artifacts_json: Option<String> = row.get(12)?;
+    let artifacts = artifacts_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .unwrap_or_default();
+    let pass_int: i64 = row.get(8)?;
+
+    Ok(SyntheticQaRunRow {
+        id: row.get(0)?,
+        review_id: row.get(1)?,
+        repo_path: row.get(2)?,
+        loop_id: row.get(3)?,
+        runner_type: row.get(4)?,
+        base_url: row.get(5)?,
+        route: row.get(6)?,
+        goal: row.get(7)?,
+        pass: pass_int != 0,
+        duration_ms: row.get(9)?,
+        notes: row.get(10)?,
+        screenshot_path: row.get(11)?,
+        artifacts,
+        console_errors: row.get(13)?,
+        error: row.get(14)?,
+        trace_json: row.get(15)?,
+        created_at: row.get(16)?,
+    })
+}
+
+pub fn list_synthetic_qa_runs_for_review(
+    conn: &Connection,
+    review_id: &str,
+    limit: i64,
+) -> Result<Vec<SyntheticQaRunRow>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, review_id, repo_path, loop_id, runner_type, base_url,
+                route, goal, pass, duration_ms, notes, screenshot_path,
+                artifacts, console_errors, error, trace_json, created_at
+         FROM synthetic_qa_runs
+         WHERE review_id = ?1
+         ORDER BY created_at DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![review_id, limit], synthetic_qa_run_from_row)?;
+    rows.collect()
 }
 
 pub fn list_local_reviews_filtered(
@@ -654,7 +1022,14 @@ pub fn log_activity(conn: &Connection, entry: &ActivityInput) -> Result<(), rusq
     conn.execute(
         "INSERT INTO activity_log (id, agent_id, event_type, summary, metadata, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![id, entry.agent_id, entry.event_type, entry.summary, entry.metadata, now],
+        params![
+            id,
+            entry.agent_id,
+            entry.event_type,
+            entry.summary,
+            entry.metadata,
+            now
+        ],
     )?;
     Ok(())
 }
@@ -676,7 +1051,9 @@ pub struct ProviderAccountRow {
     pub updated_at: String,
 }
 
-pub fn list_provider_accounts(conn: &Connection) -> Result<Vec<ProviderAccountRow>, rusqlite::Error> {
+pub fn list_provider_accounts(
+    conn: &Connection,
+) -> Result<Vec<ProviderAccountRow>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT id, name, provider, api_key, monthly_limit, plan, weekly_limit, created_at, updated_at
          FROM provider_accounts
@@ -698,7 +1075,10 @@ pub fn list_provider_accounts(conn: &Connection) -> Result<Vec<ProviderAccountRo
     rows.collect()
 }
 
-pub fn create_provider_account(conn: &Connection, account: &ProviderAccountRow) -> Result<(), rusqlite::Error> {
+pub fn create_provider_account(
+    conn: &Connection,
+    account: &ProviderAccountRow,
+) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT INTO provider_accounts (id, name, provider, api_key, monthly_limit, plan, weekly_limit, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -717,7 +1097,10 @@ pub fn create_provider_account(conn: &Connection, account: &ProviderAccountRow) 
     Ok(())
 }
 
-pub fn update_provider_account(conn: &Connection, account: &ProviderAccountRow) -> Result<(), rusqlite::Error> {
+pub fn update_provider_account(
+    conn: &Connection,
+    account: &ProviderAccountRow,
+) -> Result<(), rusqlite::Error> {
     conn.execute(
         "UPDATE provider_accounts SET name = ?2, provider = ?3, api_key = ?4,
          monthly_limit = ?5, plan = ?6, weekly_limit = ?7, updated_at = ?8
@@ -789,12 +1172,21 @@ pub fn get_index_stats(conn: &Connection) -> Result<IndexStats, rusqlite::Error>
         [],
         |r| r.get(0),
     )?;
-    let total_input_tokens: i64 =
-        conn.query_row("SELECT COALESCE(SUM(total_input_tokens), 0) FROM cc_sessions", [], |r| r.get(0))?;
-    let total_output_tokens: i64 =
-        conn.query_row("SELECT COALESCE(SUM(total_output_tokens), 0) FROM cc_sessions", [], |r| r.get(0))?;
-    let total_cost_usd: f64 =
-        conn.query_row("SELECT COALESCE(SUM(estimated_cost_usd), 0.0) FROM cc_sessions", [], |r| r.get(0))?;
+    let total_input_tokens: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(total_input_tokens), 0) FROM cc_sessions",
+        [],
+        |r| r.get(0),
+    )?;
+    let total_output_tokens: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(total_output_tokens), 0) FROM cc_sessions",
+        [],
+        |r| r.get(0),
+    )?;
+    let total_cost_usd: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(estimated_cost_usd), 0.0) FROM cc_sessions",
+        [],
+        |r| r.get(0),
+    )?;
     Ok(IndexStats {
         project_count,
         session_count,
@@ -900,7 +1292,9 @@ pub fn get_token_usage_stats(conn: &Connection) -> Result<TokenUsageStats, rusql
     // Daily series: last 30 days from the day_map (zero-filled).
     let mut daily_series = Vec::with_capacity(30);
     for i in 0..30 {
-        let d = (today - Duration::days(29 - i)).format("%Y-%m-%d").to_string();
+        let d = (today - Duration::days(29 - i))
+            .format("%Y-%m-%d")
+            .to_string();
         let tokens = day_map.get(&d).copied().unwrap_or(0.0).round() as i64;
         daily_series.push(DayBucket { date: d, tokens });
     }
@@ -1167,4 +1561,135 @@ pub fn list_talks_for_project(
         })
     })?;
     rows.collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::schema;
+
+    #[test]
+    fn review_procedure_event_round_trips_for_review() {
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::run_migrations(&conn).expect("schema");
+        let review_id = create_local_review(
+            &conn,
+            &LocalReviewInput {
+                review_type: Some("cli".to_string()),
+                source_label: Some("HEAD".to_string()),
+                repo_path: Some("/tmp/repo".to_string()),
+                repo_full_name: None,
+                pr_number: None,
+                agent_used: Some("claude".to_string()),
+                status: Some("completed".to_string()),
+            },
+        )
+        .expect("review");
+
+        let inserted = insert_review_procedure_event(
+            &conn,
+            &ReviewProcedureEventInput {
+                review_id: review_id.clone(),
+                step_id: "verify_ui_route_change".to_string(),
+                status: "satisfied".to_string(),
+                source: "qa:playwright_builtin".to_string(),
+                summary: "PASS /review (812ms)".to_string(),
+                artifact: Some("artifacts/review.png".to_string()),
+                metadata: Some("{\"pass\":true}".to_string()),
+            },
+        )
+        .expect("event");
+
+        let events = list_review_procedure_events(&conn, &review_id).expect("events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, inserted.id);
+        assert_eq!(events[0].step_id, "verify_ui_route_change");
+        assert_eq!(events[0].status, "satisfied");
+        assert_eq!(events[0].artifact.as_deref(), Some("artifacts/review.png"));
+    }
+
+    #[test]
+    fn synthetic_qa_run_round_trips_for_review() {
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::run_migrations(&conn).expect("schema");
+        let review_id = create_local_review(
+            &conn,
+            &LocalReviewInput {
+                review_type: Some("cli".to_string()),
+                source_label: Some("HEAD".to_string()),
+                repo_path: Some("/tmp/repo".to_string()),
+                repo_full_name: None,
+                pr_number: None,
+                agent_used: Some("claude".to_string()),
+                status: Some("completed".to_string()),
+            },
+        )
+        .expect("review");
+
+        let inserted = insert_synthetic_qa_run(
+            &conn,
+            &SyntheticQaRunInput {
+                review_id: Some(review_id.clone()),
+                repo_path: Some("/tmp/repo".to_string()),
+                loop_id: "checkout-smoke".to_string(),
+                runner_type: "repo_playwright".to_string(),
+                base_url: Some("http://localhost:5173".to_string()),
+                route: Some("/checkout".to_string()),
+                goal: Some("Complete checkout".to_string()),
+                pass: false,
+                duration_ms: 814,
+                notes: Some("Button click failed".to_string()),
+                screenshot_path: Some("/tmp/qa/failure.png".to_string()),
+                artifacts: vec!["/tmp/qa/trace.zip".to_string()],
+                console_errors: 2,
+                error: None,
+                trace_json: Some("{\"page_title\":\"Checkout\"}".to_string()),
+            },
+        )
+        .expect("qa run");
+
+        let runs = list_synthetic_qa_runs_for_review(&conn, &review_id, 10).expect("runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, inserted.id);
+        assert_eq!(runs[0].loop_id, "checkout-smoke");
+        assert!(!runs[0].pass);
+        assert_eq!(runs[0].console_errors, 2);
+        assert_eq!(runs[0].artifacts, vec!["/tmp/qa/trace.zip".to_string()]);
+    }
+
+    #[test]
+    fn session_adapter_run_round_trips_metadata_and_warnings() {
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::run_migrations(&conn).expect("schema");
+
+        let inserted = insert_session_adapter_run(
+            &conn,
+            &SessionAdapterRunInput {
+                project: Some("project-a".to_string()),
+                adapter_id: "codex".to_string(),
+                agent_type: Some("codex".to_string()),
+                source_roots: vec!["/Users/me/.codex/sessions".to_string()],
+                sample_source_paths: vec!["/Users/me/.codex/sessions/a.jsonl".to_string()],
+                evidence_archive: "sqlite:cc_sessions".to_string(),
+                sessions_indexed: 2,
+                messages_indexed: 42,
+                last_indexed_at: Some("2026-06-12T12:00:00Z".to_string()),
+                sample_session_ids: vec!["s1".to_string(), "s2".to_string()],
+                parse_warnings: vec!["s2 has no indexed messages".to_string()],
+                supports_incremental: true,
+            },
+        )
+        .expect("adapter run");
+
+        assert_eq!(inserted.adapter_id, "codex");
+        assert_eq!(inserted.sessions_indexed, 2);
+        assert_eq!(inserted.parse_warnings.len(), 1);
+        assert!(inserted.supports_incremental);
+
+        let rows = list_session_adapter_runs(&conn, Some("project-a"), 10).expect("adapter runs");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, inserted.id);
+        assert_eq!(rows[0].sample_session_ids, vec!["s1", "s2"]);
+        assert_eq!(rows[0].source_roots, vec!["/Users/me/.codex/sessions"]);
+    }
 }

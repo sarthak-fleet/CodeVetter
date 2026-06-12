@@ -1,8 +1,9 @@
+use crate::{db::queries, DbState};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use tauri::Manager;
+use tauri::{Manager, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyntheticQaTrace {
@@ -30,6 +31,14 @@ pub struct SyntheticQaRunResult {
 pub struct PlaywrightSpecCandidate {
     pub path: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordSyntheticQaRunInput {
+    pub review_id: Option<String>,
+    pub repo_path: Option<String>,
+    pub base_url: Option<String>,
+    pub run: SyntheticQaRunResult,
 }
 
 #[derive(Debug, Default)]
@@ -451,6 +460,74 @@ pub async fn discover_playwright_specs(repo_path: String) -> Result<Value, Strin
     }
     let specs = scan_playwright_specs(&root);
     Ok(json!({ "specs": specs }))
+}
+
+#[tauri::command]
+pub async fn record_synthetic_qa_run(
+    db: State<'_, DbState>,
+    input: RecordSyntheticQaRunInput,
+) -> Result<Value, String> {
+    let trace_json = serde_json::to_string(&input.run.trace).ok();
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let row = queries::insert_synthetic_qa_run(
+        &conn,
+        &queries::SyntheticQaRunInput {
+            review_id: input
+                .review_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+            repo_path: input
+                .repo_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+            loop_id: input.run.loop_id.clone(),
+            runner_type: input
+                .run
+                .runner_type
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            base_url: input
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+            route: Some(input.run.route.clone()),
+            goal: Some(input.run.goal.clone()),
+            pass: input.run.pass,
+            duration_ms: input.run.duration_ms as i64,
+            notes: Some(input.run.notes.clone()),
+            screenshot_path: input.run.screenshot_path.clone(),
+            artifacts: input.run.artifacts.clone(),
+            console_errors: input.run.trace.console_errors.len() as i64,
+            error: input.run.error.clone(),
+            trace_json,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(json!({ "run": row }))
+}
+
+#[tauri::command]
+pub async fn list_synthetic_qa_runs(
+    db: State<'_, DbState>,
+    review_id: String,
+    limit: Option<i64>,
+) -> Result<Value, String> {
+    let review_id = review_id.trim().to_string();
+    if review_id.is_empty() {
+        return Ok(json!({ "runs": [] }));
+    }
+    let limit = limit.unwrap_or(8).clamp(1, 50);
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let runs = queries::list_synthetic_qa_runs_for_review(&conn, &review_id, limit)
+        .map_err(|e| e.to_string())?;
+    Ok(json!({ "runs": runs }))
 }
 
 /// Run the first synthetic-user QA loop against a local HTTP app (Playwright).

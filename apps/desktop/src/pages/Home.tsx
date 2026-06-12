@@ -14,6 +14,7 @@ import type {
   IndexStats,
   LiveUsageResult,
   ProviderAccount,
+  SessionScorecard,
   TokenUsageStats,
   TriggerIndexResult,
 } from "@/lib/tauri-ipc";
@@ -22,6 +23,7 @@ import {
   checkLiveUsage,
   deleteProviderAccount,
   detectProviderAccounts,
+  getAiSessionScorecard,
   getIndexStats,
   getTokenUsageStats,
   isTauriAvailable,
@@ -578,6 +580,7 @@ let _cachedDashboard: {
   accounts: ProviderAccount[];
   usages: Record<string, AccountUsage>;
   liveUsages: Record<string, LiveUsageResult>;
+  sessionScorecard: SessionScorecard | null;
   fetchedAt: number;
 } | null = null;
 
@@ -938,6 +941,107 @@ function WeeklyAgentSplit({
   );
 }
 
+function scoreTone(score: number): string {
+  if (score >= 80) return "text-emerald-300";
+  if (score >= 60) return "text-amber-300";
+  return "text-red-300";
+}
+
+function SessionScorecardPanel({ scorecard }: { scorecard: SessionScorecard | null }) {
+  if (!scorecard || scorecard.sessions_analyzed === 0) return null;
+  const adapters = scorecard.adapters ?? [];
+  const topDimensions = [...scorecard.dimensions]
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 3);
+  const topRecommendation = scorecard.recommendations[0];
+  const adapterWarningCount = adapters.reduce(
+    (sum, adapter) => sum + adapter.parse_warnings.length,
+    0,
+  );
+
+  return (
+    <div className="cv-panel px-4 py-3">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <Activity size={15} className="shrink-0 text-cyan-300" />
+          <div className="min-w-0">
+            <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-slate-500">
+              AI session intelligence
+            </div>
+            <div className="truncate text-xs text-slate-400">
+              {scorecard.sessions_analyzed} indexed session
+              {scorecard.sessions_analyzed === 1 ? "" : "s"} · schema v
+              {scorecard.schema_version}
+            </div>
+          </div>
+        </div>
+        <div className={`font-mono text-2xl font-semibold ${scoreTone(scorecard.overall_score)}`}>
+          {scorecard.overall_score}
+        </div>
+      </div>
+
+      {adapters.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-1.5">
+          {adapters.map((adapter) => (
+            <Badge
+              key={adapter.adapter_id}
+              variant="outline"
+              className="rounded-full border-[#252525] px-2 py-0.5 text-[10px] font-normal text-slate-400"
+              title={`${adapter.evidence_archive} · ${adapter.messages_indexed} indexed messages`}
+            >
+              {adapter.adapter_id}: {adapter.sessions_indexed}
+            </Badge>
+          ))}
+          {adapterWarningCount > 0 && (
+            <span className="text-[10px] text-amber-300/80">
+              {adapterWarningCount} adapter warning{adapterWarningCount === 1 ? "" : "s"}
+            </span>
+          )}
+        </div>
+      )}
+
+      <div className="grid gap-2 md:grid-cols-3">
+        {topDimensions.map((dimension) => (
+          <div
+            key={dimension.id}
+            className="rounded border border-[#1a1a1a] bg-[#050505] px-2.5 py-2"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate text-[11px] text-slate-300">{dimension.label}</span>
+              <span className={`font-mono text-xs ${scoreTone(dimension.score)}`}>
+                {dimension.score}
+              </span>
+            </div>
+            <div className="mt-1 h-1 overflow-hidden rounded-full bg-slate-800">
+              <div
+                className="h-full rounded-full bg-cyan-300/70"
+                style={{ width: `${Math.max(3, Math.min(100, dimension.score))}%` }}
+              />
+            </div>
+            <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-slate-500">
+              {dimension.next_action}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      {topRecommendation && (
+        <div className="mt-3 flex items-start gap-2 border-t border-[#1a1a1a] pt-2">
+          <Badge variant="outline" className="mt-0.5 rounded-full px-1.5 py-0 text-[9px] uppercase">
+            {topRecommendation.severity}
+          </Badge>
+          <div className="min-w-0">
+            <div className="truncate text-xs text-slate-300">{topRecommendation.title}</div>
+            <p className="line-clamp-2 text-[10px] leading-4 text-slate-500">
+              {topRecommendation.next_action}
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes
 
 export default function Home() {
@@ -949,6 +1053,9 @@ export default function Home() {
   const [accounts, setAccounts] = useState<ProviderAccount[]>(_cachedDashboard?.accounts ?? []);
   const [accountUsages, setAccountUsages] = useState<Record<string, AccountUsage>>(_cachedDashboard?.usages ?? {});
   const [liveUsages, setLiveUsages] = useState<Record<string, LiveUsageResult>>(_cachedDashboard?.liveUsages ?? {});
+  const [sessionScorecard, setSessionScorecard] = useState<SessionScorecard | null>(
+    _cachedDashboard?.sessionScorecard ?? null,
+  );
   const [checkingLiveFor, setCheckingLiveFor] = useState<string | null>(null);
 
   // UI state — skip loading spinner if we have cached data
@@ -981,6 +1088,7 @@ export default function Home() {
         statsResult,
         tokenUsageResult,
         accountsResult,
+        scorecardResult,
         cachedUsagesResult,
       ] = await Promise.all([
         getIndexStats().then(
@@ -998,6 +1106,10 @@ export default function Home() {
             (v) => ({ status: "fulfilled" as const, value: v }),
             (e) => ({ status: "rejected" as const, reason: e })
           ),
+        getAiSessionScorecard({ limit: 50 }).then(
+          (v) => ({ status: "fulfilled" as const, value: v }),
+          (e) => ({ status: "rejected" as const, reason: e })
+        ),
         cachedUsagePromise,
       ]);
 
@@ -1006,6 +1118,9 @@ export default function Home() {
       }
       if (tokenUsageResult.status === "fulfilled") {
         setTokenUsage(tokenUsageResult.value);
+      }
+      if (scorecardResult.status === "fulfilled") {
+        setSessionScorecard(scorecardResult.value);
       }
 
       // Seed usage map with cached-ID results that came back alongside the rest.
@@ -1079,9 +1194,10 @@ export default function Home() {
       accounts,
       usages: accountUsages,
       liveUsages,
+      sessionScorecard,
       fetchedAt: Date.now(),
     };
-  }, [loading, stats, tokenUsage, accounts, accountUsages, liveUsages]);
+  }, [loading, stats, tokenUsage, accounts, accountUsages, liveUsages, sessionScorecard]);
 
   // Refresh without showing loading spinners (for background event updates)
   const refreshDashboard = useCallback(() => {
@@ -1218,6 +1334,8 @@ export default function Home() {
           </button>
         </div>
       )}
+
+      <SessionScorecardPanel scorecard={sessionScorecard} />
 
       {/* Token period cards */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
