@@ -2930,6 +2930,28 @@ export default function QuickReview() {
         findings,
         evidence,
         browserEvidence,
+        timelineReplay: {
+          segmentId: item.id,
+          label: item.label,
+          phase: item.phase,
+          status: item.status,
+          detail: item.detail,
+          jumpKind: item.jump?.kind ?? null,
+          jumpPath: item.jump?.path ?? null,
+          jumpLine: item.jump?.line ?? null,
+          anchors: (item.anchors ?? []).slice(0, 4).map((anchor) => ({
+            label: anchor.label,
+            source: anchor.source,
+            status: anchor.status,
+            sourcePath: anchor.sourcePath ?? null,
+            sourceLine: anchor.sourceLine ?? null,
+            eventId: anchor.eventId ?? null,
+            sessionId: anchor.sessionId ?? null,
+            artifact: anchor.artifact ?? null,
+            jumpKind: anchor.jump?.kind ?? null,
+            jumpPath: anchor.jump?.path ?? null,
+          })),
+        },
       });
 
       try {

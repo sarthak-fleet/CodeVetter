@@ -956,12 +956,12 @@ function scoreTone(score: number): string {
   return "text-red-300";
 }
 
-const ROADMAP_RELEASE_VERSION = "1.1.31";
+const ROADMAP_RELEASE_VERSION = "1.1.32";
 
 const ROADMAP_RELEASE_ITEMS = [
   {
     label: "Agent timeline",
-    detail: "Jump targets, command anchors, claim checks, edit origins, and timeline fix packets.",
+    detail: "Jump targets, command anchors, claim checks, replay packets, edit origins, and fix packets.",
     href: "/review",
   },
   {
