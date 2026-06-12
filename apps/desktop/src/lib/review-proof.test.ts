@@ -440,6 +440,138 @@ describe("buildReviewerProofMarkdown", () => {
     assert.equal(contradictedClaim?.jump?.kind, "command_source");
   });
 
+  it("flags unknown verification command outcomes as claim-check proof gaps", () => {
+    const timeline = buildVerificationTimeline({
+      runId: "review-unknown-command",
+      review: {
+        findingsCount: 1,
+      },
+      evidenceCounts: {
+        fixed: 0,
+        reproduced: 1,
+        notReproduced: 0,
+      },
+      history: {
+        command_signals: [
+          {
+            agent: "codex",
+            date: "2026-06-12T00:00:00Z",
+            command: "npm run test:checkout",
+            status: "unknown",
+            source: "raw_session",
+            source_path: "/tmp/session.jsonl",
+            source_line: 22,
+            event_id: "cmd-unknown",
+            session_id: "session-unknown-command",
+          },
+        ],
+      },
+    });
+
+    const claimCheckStep = timeline.find((item) => item.id === "claim-check");
+    assert.equal(claimCheckStep?.status, "active");
+    assert.match(claimCheckStep?.detail ?? "", /0 blocking, 1 need proof/);
+    assert.equal(
+      claimCheckStep?.anchors?.[0]?.label,
+      "Unverified command outcome: npm run test:checkout",
+    );
+    assert.equal(claimCheckStep?.anchors?.[0]?.source, "raw_session");
+    assert.equal(claimCheckStep?.anchors?.[0]?.jump?.kind, "command_source");
+  });
+
+  it("blocks claim checks when latest QA is still failing without a comparison", () => {
+    const timeline = buildVerificationTimeline({
+      runId: "review-latest-qa-failed",
+      review: {
+        findingsCount: 1,
+      },
+      qa: {
+        latest: {
+          pass: false,
+          runnerType: "repo_playwright",
+          route: "/checkout",
+          goal: "Complete checkout",
+          durationMs: 900,
+          screenshotPath: "artifacts/latest-fail.png",
+          artifacts: ["artifacts/latest-fail.log"],
+        },
+      },
+      evidenceCounts: {
+        fixed: 1,
+        reproduced: 0,
+        notReproduced: 0,
+      },
+    });
+
+    const claimCheckStep = timeline.find((item) => item.id === "claim-check");
+    assert.equal(claimCheckStep?.status, "blocked");
+    assert.match(claimCheckStep?.detail ?? "", /1 blocking, 0 need proof/);
+    assert.equal(claimCheckStep?.anchors?.[0]?.label, "Latest QA still failing: /checkout");
+    assert.equal(claimCheckStep?.anchors?.[0]?.artifact, "artifacts/latest-fail.png");
+    assert.equal(claimCheckStep?.anchors?.[0]?.jump?.kind, "artifact");
+  });
+
+  it("flags evidence-count-only loops that lack executable proof", () => {
+    const timeline = buildVerificationTimeline({
+      runId: "review-thin-proof",
+      review: {
+        findingsCount: 2,
+      },
+      evidenceCounts: {
+        fixed: 1,
+        reproduced: 1,
+        notReproduced: 0,
+      },
+    });
+
+    const claimCheckStep = timeline.find((item) => item.id === "claim-check");
+    assert.equal(claimCheckStep?.status, "active");
+    assert.match(claimCheckStep?.detail ?? "", /0 blocking, 1 need proof/);
+    assert.equal(
+      claimCheckStep?.anchors?.[0]?.label,
+      "Executable proof missing: 2 evidence statuses for 2 findings",
+    );
+    assert.equal(claimCheckStep?.anchors?.[0]?.source, "review:evidence-strength");
+    assert.match(claimCheckStep?.anchors?.[0]?.contextExcerpt?.join("\n") ?? "", /0 passed verification commands/);
+  });
+
+  it("recognizes passed command proof when claim gaps are clean", () => {
+    const timeline = buildVerificationTimeline({
+      runId: "review-good-loop",
+      review: {
+        findingsCount: 1,
+      },
+      evidenceCounts: {
+        fixed: 0,
+        reproduced: 1,
+        notReproduced: 0,
+      },
+      history: {
+        command_signals: [
+          {
+            agent: "codex",
+            date: "2026-06-12T00:00:00Z",
+            command: "npm run test:checkout",
+            status: "passed",
+            source: "raw_session",
+            source_path: "/tmp/session.jsonl",
+            source_line: 30,
+            event_id: "cmd-passed",
+            session_id: "session-good-loop",
+          },
+        ],
+      },
+    });
+
+    const claimCheckStep = timeline.find((item) => item.id === "claim-check");
+    assert.equal(claimCheckStep?.status, "done");
+    assert.match(
+      claimCheckStep?.detail ?? "",
+      /No claim\/evidence gaps detected · 1 passed verification command/,
+    );
+    assert.equal(claimCheckStep?.anchors?.length, 0);
+  });
+
   it("copies concrete command evidence into finding handoff proof", () => {
     const history = new Map<number, HistoryFindingSummary>();
     history.set(0, {

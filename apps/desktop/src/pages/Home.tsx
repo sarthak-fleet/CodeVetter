@@ -965,7 +965,7 @@ function scoreTone(score: number): string {
   return "text-red-300";
 }
 
-const ROADMAP_RELEASE_VERSION = "1.1.48";
+const ROADMAP_RELEASE_VERSION = "1.1.49";
 
 const ROADMAP_RELEASE_ITEMS = [
   {
@@ -979,9 +979,9 @@ const ROADMAP_RELEASE_ITEMS = [
     href: "/roadmap",
   },
   {
-    label: "Usage launch surface",
-    detail: "Home opens directly into usage telemetry while Roadmap keeps the deeper build surfaces.",
-    href: "/",
+    label: "Timeline proof strength",
+    detail: "Claim checks now flag unknown command outcomes, failed QA, and evidence without executable proof.",
+    href: "/review",
   },
 ];
 

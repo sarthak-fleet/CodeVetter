@@ -449,6 +449,20 @@ function isPositiveVerificationClaim(claim: string): boolean {
   ].some((pattern) => pattern.test(normalized));
 }
 
+function isVerificationCommandLabel(label: string): boolean {
+  const normalized = label.trim().toLowerCase();
+  return [
+    /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|lint|build|typecheck|check|e2e|playwright)\b/,
+    /\b(?:cargo\s+(?:test|clippy|build)|go\s+test|pytest|vitest|jest|tsc|eslint|playwright|cypress)\b/,
+    /\b(?:test|lint|build|typecheck|check|e2e|qa|ci)\b/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function latestQaArtifact(run: NonNullable<VerificationTimelineInput["qa"]>["latest"]): string | null {
+  if (!run) return null;
+  return run.screenshotPath ?? run.artifacts?.[0] ?? null;
+}
+
 function buildClaimCheckTimelineAnchors(
   input: VerificationTimelineInput,
   commandAnchors: VerificationTimelineAnchor[],
@@ -459,6 +473,12 @@ function buildClaimCheckTimelineAnchors(
   const runId = input.runId?.trim() || "active-review";
   const findingsCount = Math.max(0, input.review?.findingsCount ?? 0);
   const uncheckedCount = Math.max(0, findingsCount - evidenceTotal);
+  const passedVerificationCommandCount = commandAnchors.filter(
+    (anchor) => anchor.status === "passed" && isVerificationCommandLabel(anchor.label),
+  ).length;
+  const successfulQaProofCount =
+    (input.qa?.latest?.pass ? 1 : 0) +
+    (qaComparison && qaComparisonStatusToTimelineStatus(qaComparison.status) === "done" ? 1 : 0);
 
   commandAnchors
     .filter((anchor) => anchor.status === "failed" || anchor.status === "stale")
@@ -470,6 +490,21 @@ function buildClaimCheckTimelineAnchors(
           anchor.status === "failed"
             ? `Claim/test mismatch: ${anchor.label}`
             : `Stale verification evidence: ${anchor.label}`,
+      });
+    });
+
+  commandAnchors
+    .filter((anchor) => anchor.status === "unknown" && isVerificationCommandLabel(anchor.label))
+    .slice(0, 2)
+    .forEach((anchor) => {
+      anchors.push({
+        ...anchor,
+        id: `claim:unknown-command:${anchor.id}`,
+        label: `Unverified command outcome: ${anchor.label}`,
+        status: "unknown",
+        contextExcerpt: anchor.contextExcerpt?.length
+          ? anchor.contextExcerpt
+          : ["Command was observed without a pass/fail status; rerun it or attach its log before trusting the claim."],
       });
     });
 
@@ -510,6 +545,27 @@ function buildClaimCheckTimelineAnchors(
       status: "unknown",
       eventId: `${runId}:claim:unchecked-evidence`,
       sessionId: runId,
+    });
+  }
+
+  if (input.qa?.latest && !input.qa.latest.pass && !qaComparison) {
+    const artifact = latestQaArtifact(input.qa.latest);
+    anchors.push({
+      id: `${runId}:claim:latest-qa-failed`,
+      label: `Latest QA still failing: ${input.qa.latest.route ?? input.qa.latest.goal}`,
+      source: `qa:${input.qa.latest.runnerType}`,
+      status: "failed",
+      sourcePath: artifact,
+      eventId: `${runId}:claim:latest-qa-failed`,
+      sessionId: runId,
+      artifact,
+      jump: artifact
+        ? {
+          kind: "artifact",
+          label: "Open latest QA artifact",
+          path: artifact,
+        }
+        : null,
     });
   }
 
@@ -555,6 +611,26 @@ function buildClaimCheckTimelineAnchors(
           path: input.fixResult.worktreePath,
         }
         : null,
+    });
+  }
+
+  if (
+    anchors.length === 0 &&
+    findingsCount > 0 &&
+    evidenceTotal >= findingsCount &&
+    passedVerificationCommandCount + successfulQaProofCount === 0
+  ) {
+    anchors.push({
+      id: `${runId}:claim:executable-proof-missing`,
+      label: `Executable proof missing: ${evidenceTotal} evidence status${evidenceTotal === 1 ? "" : "es"} for ${findingsCount} finding${findingsCount === 1 ? "" : "s"}`,
+      source: "review:evidence-strength",
+      status: "unknown",
+      contextExcerpt: [
+        `${input.evidenceCounts.reproduced} reproduced, ${input.evidenceCounts.fixed} fixed, ${input.evidenceCounts.notReproduced} not reproduced`,
+        "0 passed verification commands, 0 passing QA proofs",
+      ],
+      eventId: `${runId}:claim:executable-proof-missing`,
+      sessionId: runId,
     });
   }
 
@@ -722,6 +798,20 @@ export function buildVerificationTimeline(
     evidenceTotal,
   );
   const failedCommandCount = commandAnchors.filter((anchor) => anchor.status === "failed").length;
+  const passedVerificationCommandCount = commandAnchors.filter(
+    (anchor) => anchor.status === "passed" && isVerificationCommandLabel(anchor.label),
+  ).length;
+  const successfulQaProofCount =
+    (latestQa?.pass ? 1 : 0) +
+    (qaComparison && qaComparisonStatusToTimelineStatus(qaComparison.status) === "done" ? 1 : 0);
+  const proofSignalDetail = [
+    passedVerificationCommandCount > 0
+      ? `${passedVerificationCommandCount} passed verification command${passedVerificationCommandCount === 1 ? "" : "s"}`
+      : null,
+    successfulQaProofCount > 0
+      ? `${successfulQaProofCount} QA proof${successfulQaProofCount === 1 ? "" : "s"}`
+      : null,
+  ].filter(Boolean).join(", ");
   const selectedFindingIndex = input.review?.selectedFindingIndex ?? null;
   const firstFindingPath = input.review?.firstFindingPath?.trim();
   const firstFindingLine = input.review?.firstFindingLine ?? null;
@@ -796,7 +886,7 @@ export function buildVerificationTimeline(
   const claimCheckDetail = claimCheckAnchors.length > 0
     ? `${blockedClaimCount} blocking, ${pendingClaimCount} need proof`
     : claimCheckStatus === "done"
-      ? "No claim/evidence gaps detected"
+      ? `No claim/evidence gaps detected${proofSignalDetail ? ` · ${proofSignalDetail}` : ""}`
       : "No claims checked yet";
   const claimCheckJump = claimCheckAnchors.find((anchor) => anchor.jump)?.jump ?? null;
 
