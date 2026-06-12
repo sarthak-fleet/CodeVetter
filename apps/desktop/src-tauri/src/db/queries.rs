@@ -291,14 +291,8 @@ pub struct ActivityInput {
 #[derive(Debug, Clone)]
 pub struct SessionMeta {
     pub id: String,
-    pub file_size_bytes: i64,
     pub file_mtime: Option<String>,
-    pub total_input_tokens: i64,
-    pub total_output_tokens: i64,
     pub message_count: i64,
-    pub cache_read_tokens: i64,
-    pub cache_creation_tokens: i64,
-    pub compaction_count: i64,
 }
 
 /// Look up the stored session metadata for a given `jsonl_path`.
@@ -308,23 +302,15 @@ pub fn get_session_by_jsonl_path(
     jsonl_path: &str,
 ) -> Result<Option<SessionMeta>, rusqlite::Error> {
     conn.query_row(
-        "SELECT id, file_size_bytes, file_mtime, total_input_tokens,
-                total_output_tokens, message_count, cache_read_tokens,
-                cache_creation_tokens, compaction_count
+        "SELECT id, file_mtime, message_count
          FROM cc_sessions
          WHERE jsonl_path = ?1",
         params![jsonl_path],
         |row| {
             Ok(SessionMeta {
                 id: row.get(0)?,
-                file_size_bytes: row.get(1)?,
-                file_mtime: row.get(2)?,
-                total_input_tokens: row.get(3)?,
-                total_output_tokens: row.get(4)?,
-                message_count: row.get(5)?,
-                cache_read_tokens: row.get(6)?,
-                cache_creation_tokens: row.get(7)?,
-                compaction_count: row.get(8)?,
+                file_mtime: row.get(1)?,
+                message_count: row.get(2)?,
             })
         },
     )

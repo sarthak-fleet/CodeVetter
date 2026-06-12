@@ -391,89 +391,48 @@ struct QuickMeta {
 }
 
 fn quick_parse_session_meta(path: &std::path::Path) -> (String, QuickMeta) {
+    use crate::commands::session_adapters::{ClaudeCodeAdapter, SessionSourceAdapter};
     use std::io::BufRead;
-
-    let mut meta = QuickMeta {
-        version: None,
-        git_branch: None,
-        cwd: None,
-        slug: None,
-        model: None,
-        first_timestamp: None,
-    };
-
-    let mut session_id = uuid::Uuid::new_v4().to_string();
 
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(_) => return (session_id, meta),
+        Err(_) => {
+            return (
+                uuid::Uuid::new_v4().to_string(),
+                QuickMeta {
+                    version: None,
+                    git_branch: None,
+                    cwd: None,
+                    slug: None,
+                    model: None,
+                    first_timestamp: None,
+                },
+            );
+        }
     };
 
     let reader = std::io::BufReader::new(file);
+    let raw = reader
+        .lines()
+        .take(10)
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let summary = ClaudeCodeAdapter.parse_raw(&path.to_string_lossy(), &raw);
 
-    for line in reader.lines().take(10) {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            continue;
-        }
-
-        let parsed: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        if let Some(sid) = parsed.get("sessionId").and_then(|v| v.as_str()) {
-            session_id = sid.to_string();
-        }
-        if meta.version.is_none() {
-            meta.version = parsed
-                .get("version")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-        }
-        if meta.git_branch.is_none() {
-            meta.git_branch = parsed
-                .get("gitBranch")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-        }
-        if meta.cwd.is_none() {
-            meta.cwd = parsed.get("cwd").and_then(|v| v.as_str()).map(String::from);
-        }
-        if meta.slug.is_none() {
-            meta.slug = parsed
-                .get("slug")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-        }
-        if meta.model.is_none() {
-            meta.model = parsed
-                .get("message")
-                .and_then(|m| m.get("model"))
-                .and_then(|v| v.as_str())
-                .map(String::from);
-        }
-        if meta.first_timestamp.is_none() {
-            meta.first_timestamp = parsed
-                .get("timestamp")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-        }
-
-        if meta.version.is_some()
-            && meta.git_branch.is_some()
-            && meta.cwd.is_some()
-            && meta.first_timestamp.is_some()
-        {
-            break;
-        }
-    }
-
-    (session_id, meta)
+    (
+        summary
+            .stable_id
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        QuickMeta {
+            version: summary.cli_version,
+            git_branch: summary.git_branch,
+            cwd: summary.cwd,
+            slug: summary.slug,
+            model: summary.model_used,
+            first_timestamp: summary.first_timestamp,
+        },
+    )
 }
 
 fn resolve_all_claude_projects_dirs() -> Vec<std::path::PathBuf> {

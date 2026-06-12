@@ -22,6 +22,7 @@ pub struct RawSessionAdapterSummary {
     pub cache_read_tokens: i64,
     pub cache_creation_tokens: i64,
     pub compaction_count: i64,
+    pub slug: Option<String>,
     pub day_counts: BTreeMap<String, i64>,
     pub parse_warnings: Vec<String>,
 }
@@ -54,6 +55,7 @@ fn empty_summary(adapter_id: &str, agent_type: &str, source_ref: &str) -> RawSes
         cache_read_tokens: 0,
         cache_creation_tokens: 0,
         compaction_count: 0,
+        slug: None,
         day_counts: BTreeMap::new(),
         parse_warnings: Vec::new(),
     }
@@ -163,6 +165,9 @@ impl SessionSourceAdapter for ClaudeCodeAdapter {
             if summary.cwd.is_none() {
                 summary.cwd = value_string(Some(&parsed), "cwd");
             }
+            if let Some(slug) = value_string(Some(&parsed), "slug") {
+                summary.slug = Some(slug);
+            }
 
             let timestamp = value_string(Some(&parsed), "timestamp");
             record_day(&mut summary, timestamp.as_deref());
@@ -248,6 +253,7 @@ impl SessionSourceAdapter for CodexAdapter {
                     summary.stable_id = value_string(Some(payload), "id");
                     summary.cwd = value_string(Some(payload), "cwd");
                     summary.cli_version = value_string(Some(payload), "cli_version");
+                    summary.slug = value_string(Some(payload), "title");
                     summary.git_branch = payload
                         .get("git")
                         .and_then(|git| git.get("branch"))
@@ -357,6 +363,11 @@ impl SessionSourceAdapter for CursorAdapter {
         summary.stable_id = Some(format!("cursor-{composer_id}"));
 
         let composer = parsed.get("composer").unwrap_or(&parsed);
+        summary.slug = composer
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(String::from);
         summary.cwd = composer
             .pointer("/workspaceIdentifier/uri/fsPath")
             .and_then(|v| v.as_str())
@@ -439,6 +450,7 @@ mod tests {
         assert_eq!(summary.cache_read_tokens, 25);
         assert_eq!(summary.cache_creation_tokens, 10);
         assert_eq!(summary.compaction_count, 1);
+        assert_eq!(summary.slug, None);
         assert_eq!(summary.day_counts.get("2026-06-12"), Some(&3));
         assert!(summary.parse_warnings.is_empty());
     }
@@ -457,6 +469,7 @@ mod tests {
         assert_eq!(summary.total_input_tokens, 500);
         assert_eq!(summary.total_output_tokens, 150);
         assert_eq!(summary.cache_read_tokens, 100);
+        assert_eq!(summary.slug, None);
         assert_eq!(summary.day_counts.get("2026-06-12"), Some(&2));
         assert!(summary.parse_warnings.is_empty());
     }
@@ -470,6 +483,7 @@ mod tests {
         assert_eq!(summary.stable_id.as_deref(), Some("cursor-composer-1"));
         assert_eq!(summary.cwd.as_deref(), Some("/repo/codevetter"));
         assert_eq!(summary.model_used.as_deref(), Some("cursor-small"));
+        assert_eq!(summary.slug.as_deref(), Some("Fix checkout test"));
         assert_eq!(summary.message_count, 2);
         assert_eq!(
             summary.first_timestamp.as_deref(),
