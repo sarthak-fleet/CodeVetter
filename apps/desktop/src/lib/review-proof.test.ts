@@ -345,6 +345,44 @@ describe("buildReviewerProofMarkdown", () => {
     assert.equal(claimCheckStep?.anchors?.[0]?.source, "review:evidence");
   });
 
+  it("flags explicit agent claims as claim-check proof gaps", () => {
+    const timeline = buildVerificationTimeline({
+      runId: "review-789",
+      review: {
+        findingsCount: 1,
+      },
+      evidenceCounts: {
+        fixed: 0,
+        reproduced: 1,
+        notReproduced: 0,
+      },
+      history: {
+        agent_claims: [
+          {
+            agent: "codex",
+            date: "2026-06-12T00:00:00Z",
+            claim: "All checkout tests are passing.",
+            source: "recommended_next_steps",
+            source_line: 7,
+            event_id: "talk-1:recommended_next_steps:claim:1",
+            talk_id: "talk-1",
+            session_id: "session-1",
+          },
+        ],
+      },
+    });
+
+    const claimCheckStep = timeline.find((item) => item.id === "claim-check");
+    assert.equal(claimCheckStep?.status, "active");
+    assert.match(claimCheckStep?.detail ?? "", /0 blocking, 1 need proof/);
+    assert.equal(
+      claimCheckStep?.anchors?.[0]?.label,
+      "Unverified agent claim: All checkout tests are passing.",
+    );
+    assert.equal(claimCheckStep?.anchors?.[0]?.source, "claim:recommended_next_steps");
+    assert.equal(claimCheckStep?.anchors?.[0]?.eventId, "talk-1:recommended_next_steps:claim:1");
+  });
+
   it("copies concrete command evidence into finding handoff proof", () => {
     const history = new Map<number, HistoryFindingSummary>();
     history.set(0, {

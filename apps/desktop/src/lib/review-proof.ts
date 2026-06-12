@@ -134,7 +134,7 @@ export interface VerificationTimelineInput {
     }[];
     findingsFixed?: number;
   } | null;
-  history?: Pick<RepoHistoryContext, "command_signals"> | null;
+  history?: Pick<RepoHistoryContext, "command_signals" | "agent_claims"> | null;
 }
 
 export interface TimelineSegmentFindingSelectionInput {
@@ -463,6 +463,19 @@ function buildClaimCheckTimelineAnchors(
             : `Stale verification evidence: ${anchor.label}`,
       });
     });
+
+  (input.history?.agent_claims ?? []).slice(0, 2).forEach((claim, idx) => {
+    const id = claim.event_id ?? claim.talk_id ?? claim.session_id ?? `${runId}:agent-claim:${idx}`;
+    anchors.push({
+      id: `claim:agent:${id}`,
+      label: `Unverified agent claim: ${claim.claim}`,
+      source: `claim:${claim.source}`,
+      status: "unknown",
+      sourceLine: claim.source_line ?? null,
+      eventId: claim.event_id ?? null,
+      sessionId: claim.session_id ?? claim.talk_id ?? runId,
+    });
+  });
 
   if (uncheckedCount > 0) {
     anchors.push({
