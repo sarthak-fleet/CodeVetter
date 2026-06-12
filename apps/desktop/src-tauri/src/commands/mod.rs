@@ -8,6 +8,7 @@ pub mod history;
 pub mod preferences;
 pub mod procedure_events;
 pub mod review;
+pub mod session_adapters;
 pub mod session_intelligence;
 pub mod sessions;
 pub mod setup;
