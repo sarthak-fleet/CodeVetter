@@ -110,8 +110,8 @@ Add reusable named flows for common user journeys.
 
 Acceptance:
 
-- Flows can be cloned and edited. Implemented through named local workflows and route/goal target matrices.
-- Repo-specific flows can live alongside repository metadata. Not yet implemented as repo-scoped metadata; current workflows are local preferences.
+- Flows can be cloned and edited. Implemented through repo-scoped named local workflows, global fallback workflows, and route/goal target matrices.
+- Repo-specific flows can live alongside repository metadata. Implemented through repo-path-scoped local preference buckets for workflows and presets, with the previous global workflow list used as first-load fallback.
 - Flows remain local by default. Implemented.
 
 ## UX Requirements

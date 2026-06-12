@@ -385,6 +385,26 @@ function qaRequestFromHistory(
   };
 }
 
+function stablePreferenceSuffix(value: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Math.abs(hash >>> 0).toString(36);
+}
+
+function repoScopedPreferenceKey(prefix: string, repoPath: string): string {
+  const trimmed = repoPath.trim();
+  if (!trimmed) return prefix;
+  return `${prefix}_repo_${stablePreferenceSuffix(trimmed)}`;
+}
+
+function repoLabelFromPath(repoPath: string): string {
+  const trimmed = repoPath.trim().replace(/\/$/, "");
+  return trimmed.split("/").pop() || "repo";
+}
+
 function firstNonEmpty(values: Array<string | null | undefined>): string | undefined {
   return values.find((value) => value != null && value.trim().length > 0)?.trim();
 }
@@ -965,6 +985,7 @@ export default function QuickReview() {
   const [qaActiveWorkflowId, setQaActiveWorkflowId] = useState("");
   const [qaWorkflows, setQaWorkflows] = useState<QaWorkflowPreset[]>([]);
   const [qaPresetLoaded, setQaPresetLoaded] = useState(false);
+  const [qaPreferenceLoadedKey, setQaPreferenceLoadedKey] = useState("");
   const [qaRunHistory, setQaRunHistory] = useState<QaRunHistoryEntry[]>([]);
   const [qaRunning, setQaRunning] = useState(false);
   const [postFixQaRunning, setPostFixQaRunning] = useState(false);
@@ -986,6 +1007,18 @@ export default function QuickReview() {
     items?: RawSessionContextItem[];
   } | null>(null);
   const [commandSourcePreviewLoading, setCommandSourcePreviewLoading] = useState<string | null>(null);
+
+  const qaWorkflowPreferenceKey = useMemo(
+    () => repoScopedPreferenceKey("quick_review_qa_workflows", repoPath),
+    [repoPath],
+  );
+  const qaPresetPreferenceKey = useMemo(
+    () => repoScopedPreferenceKey("quick_review_qa_preset", repoPath),
+    [repoPath],
+  );
+  const qaWorkflowScopeLabel = repoPath.trim()
+    ? `Repo workflow · ${repoLabelFromPath(repoPath)}`
+    : "Global QA workflow";
 
   // Diff range derived from selection
   const [diffRange, setDiffRange] = useState("");
@@ -1915,13 +1948,18 @@ export default function QuickReview() {
   ]);
 
   useEffect(() => {
+    setQaPresetLoaded(false);
+    setQaPreferenceLoadedKey("");
     async function loadQaWorkflows() {
       try {
-        const [workflowsRaw, legacyRaw] = await Promise.all([
+        const [scopedWorkflowsRaw, globalWorkflowsRaw, scopedPresetRaw, legacyRaw] = await Promise.all([
+          getPreference(qaWorkflowPreferenceKey),
           getPreference("quick_review_qa_workflows"),
+          getPreference(qaPresetPreferenceKey),
           getPreference("quick_review_qa_preset"),
         ]);
 
+        const workflowsRaw = scopedWorkflowsRaw || globalWorkflowsRaw;
         if (workflowsRaw) {
           const workflows = JSON.parse(workflowsRaw) as QaWorkflowPreset[];
           if (Array.isArray(workflows) && workflows.length > 0) {
@@ -1932,22 +1970,29 @@ export default function QuickReview() {
           }
         }
 
-        if (legacyRaw) {
-          const legacy = JSON.parse(legacyRaw) as Partial<QaPreset>;
+        const presetRaw = scopedPresetRaw || legacyRaw;
+        if (presetRaw) {
+          const legacy = JSON.parse(presetRaw) as Partial<QaPreset>;
+          setQaWorkflows([]);
+          setQaActiveWorkflowId("");
           applyQaWorkflow({ ...legacy, name: CODEVETTER_REVIEW_SHELL.label });
+          return;
         }
+        setQaWorkflows([]);
+        setQaActiveWorkflowId("");
       } catch {
         // Keep defaults if local preferences are unavailable or malformed.
       } finally {
+        setQaPreferenceLoadedKey(qaWorkflowPreferenceKey);
         setQaPresetLoaded(true);
       }
     }
 
     void loadQaWorkflows();
-  }, [applyQaWorkflow]);
+  }, [applyQaWorkflow, qaPresetPreferenceKey, qaWorkflowPreferenceKey]);
 
   useEffect(() => {
-    if (!qaPresetLoaded) return;
+    if (!qaPresetLoaded || qaPreferenceLoadedKey !== qaWorkflowPreferenceKey) return;
     const preset: QaPreset = {
       baseUrl: qaBaseUrl,
       loopId: qaLoopId,
@@ -1961,7 +2006,7 @@ export default function QuickReview() {
       targetRoute: qaTargetRoute,
       allowRemoteTarget: qaAllowRemoteTarget,
     };
-    void setPreference("quick_review_qa_preset", JSON.stringify(preset)).catch(() => {});
+    void setPreference(qaPresetPreferenceKey, JSON.stringify(preset)).catch(() => {});
   }, [
     qaAuthMode,
     qaAllowRemoteTarget,
@@ -1973,14 +2018,17 @@ export default function QuickReview() {
     qaRepoSpecPath,
     qaRepoTraceMode,
     qaRunnerType,
+    qaPreferenceLoadedKey,
     qaStorageStatePath,
     qaTargetRoute,
+    qaPresetPreferenceKey,
+    qaWorkflowPreferenceKey,
   ]);
 
   useEffect(() => {
-    if (!qaPresetLoaded) return;
-    void setPreference("quick_review_qa_workflows", JSON.stringify(qaWorkflows)).catch(() => {});
-  }, [qaPresetLoaded, qaWorkflows]);
+    if (!qaPresetLoaded || qaPreferenceLoadedKey !== qaWorkflowPreferenceKey) return;
+    void setPreference(qaWorkflowPreferenceKey, JSON.stringify(qaWorkflows)).catch(() => {});
+  }, [qaPresetLoaded, qaPreferenceLoadedKey, qaWorkflowPreferenceKey, qaWorkflows]);
 
   const handleSelectQaWorkflow = useCallback((workflowId: string) => {
     setQaActiveWorkflowId(workflowId);
@@ -3267,7 +3315,7 @@ export default function QuickReview() {
                       evidence to the selected finding.
                     </p>
                     <div className="mb-2 font-mono text-[9px] uppercase tracking-[0.12em] text-slate-600">
-                      QA workflow saved locally
+                      {qaWorkflowScopeLabel}
                     </div>
                     <label className="block space-y-1">
                       <span className="cv-label">Workflow</span>
