@@ -20,7 +20,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type {
   AccountUsage,
-  IndexStats,
   LiveUsageResult,
   ProviderAccount,
   SessionAdapterRun,
@@ -33,11 +32,8 @@ import {
   checkLiveUsage,
   deleteProviderAccount,
   detectProviderAccounts,
-  getAiSessionScorecard,
-  getIndexStats,
   getTokenUsageStats,
   isTauriAvailable,
-  listAiSessionAdapterRuns,
   listProviderAccounts,
   triggerIndex,
 } from "@/lib/tauri-ipc";
@@ -598,13 +594,10 @@ function AccountUsageRow({
 
 // Module-level cache so data persists across tab switches
 let _cachedDashboard: {
-  stats: IndexStats | null;
   tokenUsage: TokenUsageStats | null;
   accounts: ProviderAccount[];
   usages: Record<string, AccountUsage>;
   liveUsages: Record<string, LiveUsageResult>;
-  sessionScorecard: SessionScorecard | null;
-  adapterRuns: SessionAdapterRun[];
   fetchedAt: number;
 } | null = null;
 
@@ -971,12 +964,12 @@ function scoreTone(score: number): string {
   return "text-red-300";
 }
 
-const ROADMAP_RELEASE_VERSION = "1.1.44";
+const ROADMAP_RELEASE_VERSION = "1.1.45";
 
 const ROADMAP_RELEASE_ITEMS = [
   {
     label: "AI session adapters",
-    detail: "Local archive now stores normalized adapter messages and tool calls.",
+    detail: "Local archive backfills normalized adapter messages and tool calls.",
     href: "/review",
   },
   {
@@ -991,7 +984,7 @@ const ROADMAP_RELEASE_ITEMS = [
   },
 ];
 
-function RoadmapReleaseBanner() {
+export function RoadmapReleaseBanner() {
   return (
     <section className="cv-panel overflow-hidden border-[var(--cv-accent)]/35 bg-[#090806]">
       <div className="grid gap-px bg-[#2b2414] lg:grid-cols-[1.2fr_2fr]">
@@ -1038,7 +1031,7 @@ function RoadmapReleaseBanner() {
   );
 }
 
-function VerificationWorkbenchPanel({
+export function VerificationWorkbenchPanel({
   scorecard,
 }: {
   scorecard: SessionScorecard | null;
@@ -1128,7 +1121,7 @@ function VerificationWorkbenchPanel({
   );
 }
 
-function SessionScorecardPanel({ scorecard }: { scorecard: SessionScorecard | null }) {
+export function SessionScorecardPanel({ scorecard }: { scorecard: SessionScorecard | null }) {
   if (!scorecard || scorecard.sessions_analyzed === 0) return null;
   const adapters = scorecard.adapters ?? [];
   const topDimensions = [...scorecard.dimensions]
@@ -1254,7 +1247,7 @@ function adapterRunHistories(runs: SessionAdapterRun[]): Array<{
     .sort((a, b) => a.adapterId.localeCompare(b.adapterId));
 }
 
-function AdapterSourceHealthPanel({ runs }: { runs: SessionAdapterRun[] }) {
+export function AdapterSourceHealthPanel({ runs }: { runs: SessionAdapterRun[] }) {
   const histories = adapterRunHistories(runs);
   if (histories.length === 0) return null;
 
@@ -1434,17 +1427,10 @@ export default function Home() {
   const isInitialLoad = useRef(true);
 
   // Data state — initialize from cache if available
-  const [stats, setStats] = useState<IndexStats | null>(_cachedDashboard?.stats ?? null);
   const [tokenUsage, setTokenUsage] = useState<TokenUsageStats | null>(_cachedDashboard?.tokenUsage ?? null);
   const [accounts, setAccounts] = useState<ProviderAccount[]>(_cachedDashboard?.accounts ?? []);
   const [accountUsages, setAccountUsages] = useState<Record<string, AccountUsage>>(_cachedDashboard?.usages ?? {});
   const [liveUsages, setLiveUsages] = useState<Record<string, LiveUsageResult>>(_cachedDashboard?.liveUsages ?? {});
-  const [sessionScorecard, setSessionScorecard] = useState<SessionScorecard | null>(
-    _cachedDashboard?.sessionScorecard ?? null,
-  );
-  const [adapterRuns, setAdapterRuns] = useState<SessionAdapterRun[]>(
-    _cachedDashboard?.adapterRuns ?? [],
-  );
   const [checkingLiveFor, setCheckingLiveFor] = useState<string | null>(null);
 
   // UI state — skip loading spinner if we have cached data
@@ -1474,17 +1460,10 @@ export default function Home() {
       );
 
       const [
-        statsResult,
         tokenUsageResult,
         accountsResult,
-        scorecardResult,
-        adapterRunsResult,
         cachedUsagesResult,
       ] = await Promise.all([
-        getIndexStats().then(
-          (v) => ({ status: "fulfilled" as const, value: v }),
-          (e) => ({ status: "rejected" as const, reason: e })
-        ),
         getTokenUsageStats().then(
           (v) => ({ status: "fulfilled" as const, value: v }),
           (e) => ({ status: "rejected" as const, reason: e })
@@ -1496,28 +1475,11 @@ export default function Home() {
             (v) => ({ status: "fulfilled" as const, value: v }),
             (e) => ({ status: "rejected" as const, reason: e })
           ),
-        getAiSessionScorecard({ limit: 50 }).then(
-          (v) => ({ status: "fulfilled" as const, value: v }),
-          (e) => ({ status: "rejected" as const, reason: e })
-        ),
-        listAiSessionAdapterRuns({ limit: 12 }).then(
-          (v) => ({ status: "fulfilled" as const, value: v }),
-          (e) => ({ status: "rejected" as const, reason: e })
-        ),
         cachedUsagePromise,
       ]);
 
-      if (statsResult.status === "fulfilled") {
-        setStats(statsResult.value);
-      }
       if (tokenUsageResult.status === "fulfilled") {
         setTokenUsage(tokenUsageResult.value);
-      }
-      if (scorecardResult.status === "fulfilled") {
-        setSessionScorecard(scorecardResult.value);
-      }
-      if (adapterRunsResult.status === "fulfilled") {
-        setAdapterRuns(adapterRunsResult.value);
       }
 
       // Seed usage map with cached-ID results that came back alongside the rest.
@@ -1555,12 +1517,12 @@ export default function Home() {
 
       // If critical reads failed, surface a friendly message — full detail
       // goes to the console, never the raw IPC error to the user.
-      if (statsResult.status === "rejected") {
-        console.error("[CodeVetter] Dashboard stats load failed:", statsResult.reason);
+      if (tokenUsageResult.status === "rejected") {
+        console.error("[CodeVetter] Usage load failed:", tokenUsageResult.reason);
         const msg =
-          statsResult.reason instanceof Error
-            ? statsResult.reason.message
-            : String(statsResult.reason);
+          tokenUsageResult.reason instanceof Error
+            ? tokenUsageResult.reason.message
+            : String(tokenUsageResult.reason);
         if (msg === "TAURI_NOT_AVAILABLE") {
           setError(
             "Tauri APIs not available. Run inside the desktop app to see live data."
@@ -1586,16 +1548,13 @@ export default function Home() {
   useEffect(() => {
     if (loading) return;
     _cachedDashboard = {
-      stats,
       tokenUsage,
       accounts,
       usages: accountUsages,
       liveUsages,
-      sessionScorecard,
-      adapterRuns,
       fetchedAt: Date.now(),
     };
-  }, [loading, stats, tokenUsage, accounts, accountUsages, liveUsages, sessionScorecard, adapterRuns]);
+  }, [loading, tokenUsage, accounts, accountUsages, liveUsages]);
 
   // Refresh without showing loading spinners (for background event updates)
   const refreshDashboard = useCallback(() => {
@@ -1696,7 +1655,14 @@ export default function Home() {
   return (
     <div className="min-h-full overflow-y-auto overflow-x-hidden px-5 pb-8 pt-20">
       <div className="mx-auto flex max-w-7xl flex-col gap-5">
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-2">
+          <Link
+            to="/roadmap"
+            className="inline-flex h-10 shrink-0 items-center justify-center gap-2 border border-[#262626] bg-[#08090a] px-4 text-xs font-medium text-slate-400 transition-colors hover:border-[var(--cv-accent)]/40 hover:text-slate-100"
+          >
+            Roadmap
+            <ArrowRight size={14} />
+          </Link>
           <Button
             variant="outline"
             size="sm"
@@ -1740,14 +1706,6 @@ export default function Home() {
           </button>
         </div>
       )}
-
-      <RoadmapReleaseBanner />
-
-      <VerificationWorkbenchPanel scorecard={sessionScorecard} />
-
-      <SessionScorecardPanel scorecard={sessionScorecard} />
-
-      <AdapterSourceHealthPanel runs={adapterRuns} />
 
       {/* Token period cards */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -1879,6 +1837,7 @@ export default function Home() {
           </Card>
         )}
       </div>
+
       </div>
     </div>
   );

@@ -201,7 +201,7 @@ Acceptance for exploring team mode:
 
 ### Phase 0: Define The Evidence Schema
 
-Status: partially implemented. A local deterministic scorecard schema is implemented over indexed `cc_sessions` with schema version, six dimensions, evidence refs, anti-gaming notes, and cited recommendations. The Home dashboard now shows the scorecard summary from the same Tauri IPC contract used by other local stats. Fixture-backed backend tests cover strong sessions and weak sessions lacking verification/repo context.
+Status: partially implemented. A local deterministic scorecard schema is implemented over indexed `cc_sessions` with schema version, six dimensions, evidence refs, anti-gaming notes, and cited recommendations. The Roadmap page now shows the scorecard summary from the same Tauri IPC contract used by other local stats, while Home stays usage-first. Fixture-backed backend tests cover strong sessions and weak sessions lacking verification/repo context.
 
 Write the first evidence and scorecard schemas before building UI.
 
@@ -228,14 +228,14 @@ Create a small adapter interface for local agent session sources.
 Acceptance:
 
 - Claude, Codex, and Cursor indexed sessions are normalized into a shared adapter summary contract in the scorecard API. Implemented for `SessionSourceAdapterSummary`.
-- Adapter output feeds one local SQLite evidence archive. Implemented for production and scorecard adapter run metadata through `session_adapter_runs`, Home source-health trend/drilldown views over those persisted runs, Claude/Codex/Cursor session upserts through the raw adapter contract, and compact normalized adapter message/tool-call rows in `session_message_archive`.
+- Adapter output feeds one local SQLite evidence archive. Implemented for production and scorecard adapter run metadata through `session_adapter_runs`, Roadmap source-health trend/drilldown views over those persisted runs, Claude/Codex/Cursor session upserts through the raw adapter contract, compact normalized adapter message/tool-call rows in `session_message_archive`, and local backfill for previously indexed Claude/Codex sessions missing archive rows.
 - Adapter output includes source paths, stable IDs, agent name, timestamps, message totals, evidence archive name, incremental support, and parse warnings. Implemented for scorecard adapter summaries, production adapter run rows, the shared raw parser adapter contract, Claude/Codex/Cursor production DB writes, and normalized message/tool-call archive rows with roles, kinds, source refs, source lines, timestamps, bounded content, tool names, and tool call IDs.
 - Tests cover at least one fixture per adapter. Implemented for raw Claude Code JSONL, Codex JSONL, and Cursor composer/bubble JSON fixtures.
 - Unsupported or malformed sessions degrade to parse warnings, not crashes. Implemented for missing transcript paths, zero-message rows in adapter summary tests, and malformed raw adapter input.
 
 Remaining:
 
-- Add full-text search and live update events over `session_message_archive`. Production index passes already persist adapter roots, sample paths/session IDs, counts, incremental support, bounded parse warnings, and normalized message/tool-call archive rows, and Home shows latest source-health status with per-adapter trends and recent-run drilldowns.
+- Add full-text search and live update events over `session_message_archive`. Production index passes already persist adapter roots, sample paths/session IDs, counts, incremental support, bounded parse warnings, normalized message/tool-call archive rows, and local backfill for previously indexed sessions missing archive rows, and Roadmap shows latest source-health status with per-adapter trends and recent-run drilldowns.
 
 ### Phase 2: Usage And Stats Contracts
 

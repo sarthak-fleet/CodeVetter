@@ -118,7 +118,13 @@ fn bounded_text(raw: impl Into<String>) -> Option<String> {
     }
     const MAX_ARCHIVE_TEXT: usize = 12_000;
     if value.len() > MAX_ARCHIVE_TEXT {
-        value.truncate(MAX_ARCHIVE_TEXT);
+        let truncate_at = value
+            .char_indices()
+            .map(|(idx, _)| idx)
+            .take_while(|idx| *idx <= MAX_ARCHIVE_TEXT)
+            .last()
+            .unwrap_or(0);
+        value.truncate(truncate_at);
         value.push_str("\n[truncated]");
     }
     Some(value)
@@ -764,5 +770,14 @@ mod tests {
             .parse_warnings
             .iter()
             .any(|warning| warning.contains("missing session_meta id")));
+    }
+
+    #[test]
+    fn archive_text_truncation_handles_unicode_boundaries() {
+        let raw = "न".repeat(12_001);
+        let text = bounded_text(raw).expect("bounded unicode text");
+
+        assert!(text.ends_with("\n[truncated]"));
+        assert!(text.is_char_boundary(text.len()));
     }
 }

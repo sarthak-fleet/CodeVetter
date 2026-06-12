@@ -331,6 +331,13 @@ pub struct SessionMeta {
     pub archived_message_count: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionArchiveBackfillCandidate {
+    pub id: String,
+    pub agent_type: String,
+    pub jsonl_path: String,
+}
+
 /// Look up the stored session metadata for a given `jsonl_path`.
 /// Returns `None` if the file has never been indexed.
 pub fn get_session_by_jsonl_path(
@@ -724,6 +731,35 @@ pub fn list_session_message_archive(
          LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![session_id, limit], session_message_archive_from_row)?;
+    rows.collect()
+}
+
+pub fn list_sessions_needing_archive_backfill(
+    conn: &Connection,
+    limit: i64,
+) -> Result<Vec<SessionArchiveBackfillCandidate>, rusqlite::Error> {
+    let limit = limit.clamp(1, 5_000);
+    let mut stmt = conn.prepare(
+        "SELECT s.id, s.agent_type, s.jsonl_path
+         FROM cc_sessions s
+         WHERE s.jsonl_path IS NOT NULL
+           AND s.message_count > 0
+           AND s.agent_type IN ('claude-code', 'codex')
+           AND (
+             SELECT COUNT(*)
+             FROM session_message_archive a
+             WHERE a.session_id = s.id
+           ) < s.message_count
+         ORDER BY datetime(s.last_message) DESC NULLS LAST
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit], |row| {
+        Ok(SessionArchiveBackfillCandidate {
+            id: row.get(0)?,
+            agent_type: row.get(1)?,
+            jsonl_path: row.get(2)?,
+        })
+    })?;
     rows.collect()
 }
 

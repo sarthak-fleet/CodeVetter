@@ -427,10 +427,21 @@ fn full_index_impl(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), Strin
     indexed_messages += codex_messages;
 
     // ── Phase 3: Scan Cursor AI sessions ─────────────────────
-    let (cursor_indexed, cursor_messages, cursor_skipped) = index_cursor_sessions(&conn)?;
-    indexed_sessions += cursor_indexed;
-    indexed_messages += cursor_messages;
-    skipped_sessions += cursor_skipped;
+    match index_cursor_sessions(&conn) {
+        Ok((cursor_indexed, cursor_messages, cursor_skipped)) => {
+            indexed_sessions += cursor_indexed;
+            indexed_messages += cursor_messages;
+            skipped_sessions += cursor_skipped;
+        }
+        Err(error) => {
+            log::warn!("Cursor session index failed; continuing with archive backfill: {error}");
+        }
+    }
+
+    let backfilled_archives = backfill_missing_session_archives(&conn)?;
+    if backfilled_archives > 0 {
+        log::info!("Backfilled normalized session archive for {backfilled_archives} sessions");
+    }
 
     Ok((indexed_sessions, indexed_messages, skipped_sessions))
 }
@@ -732,13 +743,38 @@ fn upsert_adapter_summary_session(
         let _ = queries::bump_session_day(conn, &sid, day, *n);
     }
 
+    replace_archive_messages(
+        conn,
+        &sid,
+        &adapter_id,
+        &agent_type,
+        &source_ref,
+        archive_messages,
+    )?;
+
+    Ok(IndexedAdapterSession {
+        session_id: sid,
+        source_ref,
+        messages_indexed: message_count,
+        parse_warnings,
+    })
+}
+
+fn replace_archive_messages(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    adapter_id: &str,
+    agent_type: &str,
+    source_ref: &str,
+    archive_messages: Vec<crate::commands::session_adapters::RawSessionArchiveMessage>,
+) -> Result<(), String> {
     let archive_inputs: Vec<_> = archive_messages
         .into_iter()
         .enumerate()
         .map(|(idx, message)| queries::SessionMessageArchiveInput {
-            adapter_id: adapter_id.clone(),
-            agent_type: agent_type.clone(),
-            source_ref: source_ref.clone(),
+            adapter_id: adapter_id.to_string(),
+            agent_type: agent_type.to_string(),
+            source_ref: source_ref.to_string(),
             source_line: message.source_line,
             message_index: idx as i64,
             role: message.role,
@@ -750,15 +786,8 @@ fn upsert_adapter_summary_session(
             raw_type: message.raw_type,
         })
         .collect();
-    queries::replace_session_message_archive(conn, &sid, &archive_inputs)
-        .map_err(|e| e.to_string())?;
-
-    Ok(IndexedAdapterSession {
-        session_id: sid,
-        source_ref,
-        messages_indexed: message_count,
-        parse_warnings,
-    })
+    queries::replace_session_message_archive(conn, session_id, &archive_inputs)
+        .map_err(|e| e.to_string())
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -838,6 +867,49 @@ fn parse_codex_session(
         now,
         existing.as_ref().map(|m| m.id.as_str()),
     )
+}
+
+fn backfill_missing_session_archives(conn: &rusqlite::Connection) -> Result<u64, String> {
+    let candidates =
+        queries::list_sessions_needing_archive_backfill(conn, 5_000).map_err(|e| e.to_string())?;
+    let mut backfilled = 0u64;
+
+    for candidate in candidates {
+        let path = std::path::Path::new(&candidate.jsonl_path);
+        if !path.exists() {
+            continue;
+        }
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(error) => {
+                log::warn!(
+                    "Archive backfill could not read {}: {}",
+                    candidate.jsonl_path,
+                    error
+                );
+                continue;
+            }
+        };
+        let summary = match candidate.agent_type.as_str() {
+            "claude-code" => ClaudeCodeAdapter.parse_raw(&candidate.jsonl_path, &raw),
+            "codex" => CodexAdapter.parse_raw(&candidate.jsonl_path, &raw),
+            _ => continue,
+        };
+        if summary.archive_messages.is_empty() {
+            continue;
+        }
+        replace_archive_messages(
+            conn,
+            &candidate.id,
+            &summary.adapter_id,
+            &summary.agent_type,
+            &summary.source_ref,
+            summary.archive_messages,
+        )?;
+        backfilled += 1;
+    }
+
+    Ok(backfilled)
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1374,6 +1446,58 @@ mod tests {
         assert_eq!(archived[0].adapter_id, "codex");
         assert_eq!(archived[0].role.as_deref(), Some("user"));
         assert_eq!(archived[1].raw_type.as_deref(), Some("response_item"));
+    }
+
+    #[test]
+    fn archive_backfill_repairs_existing_codex_session_rows() {
+        let conn = memory_conn_with_project();
+        let fixture = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/session_adapters/codex.jsonl"
+        ));
+
+        queries::upsert_session(
+            &conn,
+            &queries::SessionInput {
+                id: "codex-session-1".to_string(),
+                project_id: "project".to_string(),
+                agent_type: Some("codex".to_string()),
+                jsonl_path: Some(fixture.to_string_lossy().to_string()),
+                git_branch: None,
+                cwd: Some("/repo/codevetter".to_string()),
+                cli_version: None,
+                first_message: None,
+                last_message: Some("2026-06-12T16:01:00Z".to_string()),
+                message_count: Some(2),
+                total_input_tokens: Some(500),
+                total_output_tokens: Some(150),
+                model_used: Some("o3".to_string()),
+                slug: None,
+                file_size_bytes: Some(123),
+                indexed_at: Some("2026-06-12T16:03:00Z".to_string()),
+                file_mtime: Some("2026-06-12T16:03:00Z".to_string()),
+                cache_read_tokens: Some(100),
+                cache_creation_tokens: Some(0),
+                compaction_count: Some(0),
+                estimated_cost_usd: Some(0.0),
+            },
+        )
+        .expect("existing codex session");
+
+        let candidates =
+            queries::list_sessions_needing_archive_backfill(&conn, 10).expect("candidates");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, "codex-session-1");
+
+        let backfilled = backfill_missing_session_archives(&conn).expect("backfill");
+        assert_eq!(backfilled, 1);
+
+        let archived =
+            queries::list_session_message_archive(&conn, "codex-session-1", 10).expect("archive");
+        assert_eq!(archived.len(), 2);
+        assert_eq!(archived[0].adapter_id, "codex");
+        assert_eq!(archived[0].role.as_deref(), Some("user"));
+        assert_eq!(archived[1].role.as_deref(), Some("assistant"));
     }
 
     #[test]
