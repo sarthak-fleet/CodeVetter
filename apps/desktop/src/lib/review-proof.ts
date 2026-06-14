@@ -1090,13 +1090,14 @@ export function buildVerificationTimeline(
   ];
 }
 
-function sameHistoryPath(left: string, right: string): boolean {
-  const normalizedLeft = left.toLowerCase();
-  const normalizedRight = right.toLowerCase();
+// Compares two already-lowercased paths. Hoisting the lowercasing to the caller
+// lets buildCodebaseHistoryExplanations normalize each signal path once instead
+// of re-lowercasing it on every file iteration.
+function lowerPathsMatch(left: string, right: string): boolean {
   return (
-    normalizedLeft === normalizedRight ||
-    normalizedLeft.endsWith(`/${normalizedRight}`) ||
-    normalizedRight.endsWith(`/${normalizedLeft}`)
+    left === right ||
+    left.endsWith(`/${right}`) ||
+    right.endsWith(`/${left}`)
   );
 }
 
@@ -1115,23 +1116,38 @@ export function buildCodebaseHistoryExplanations(
 ): CodebaseHistoryExplanation[] {
   if (!history) return [];
 
+  // Normalize every signal path to lowercase once up front. The per-file loop
+  // below then matches against these cached keys by index, avoiding the
+  // O(files × signals) redundant toLowerCase work the previous version incurred.
+  const decisionList = history.prior_decisions ?? [];
+  const commandList = history.command_signals ?? [];
+  const commitKeys = history.recent_commits.map((commit) => commit.file.toLowerCase());
+  const decisionKeys = decisionList.map((decision) => decision.file.toLowerCase());
+  const recurringKeys = history.recurring_failures.map((failure) => failure.file.toLowerCase());
+  const agentKeys = history.prior_agent_activity.map((activity) =>
+    (activity.files ?? []).map((activityFile) => activityFile.toLowerCase()),
+  );
+  const commandKeys = commandList.map((signal) => signal.source_path?.toLowerCase() ?? null);
+
   return history.files_analyzed
     .map((file) => {
-      const commits = history.recent_commits.filter((commit) =>
-        sameHistoryPath(commit.file, file),
+      const fileKey = file.toLowerCase();
+      const commits = history.recent_commits.filter((_, idx) =>
+        lowerPathsMatch(commitKeys[idx], fileKey),
       );
-      const decisions = (history.prior_decisions ?? []).filter((decision) =>
-        sameHistoryPath(decision.file, file),
+      const decisions = decisionList.filter((_, idx) =>
+        lowerPathsMatch(decisionKeys[idx], fileKey),
       );
-      const recurring = history.recurring_failures.filter((failure) =>
-        sameHistoryPath(failure.file, file),
+      const recurring = history.recurring_failures.filter((_, idx) =>
+        lowerPathsMatch(recurringKeys[idx], fileKey),
       );
-      const agents = history.prior_agent_activity.filter((activity) =>
-        (activity.files ?? []).some((activityFile) => sameHistoryPath(activityFile, file)),
+      const agents = history.prior_agent_activity.filter((_, idx) =>
+        agentKeys[idx].some((activityKey) => lowerPathsMatch(activityKey, fileKey)),
       );
-      const commands = (history.command_signals ?? []).filter((signal) =>
-        signal.source_path ? sameHistoryPath(signal.source_path, file) : false,
-      );
+      const commands = commandList.filter((_, idx) => {
+        const key = commandKeys[idx];
+        return key != null && lowerPathsMatch(key, fileKey);
+      });
 
       const signalCount =
         commits.length + decisions.length + recurring.length + agents.length + commands.length;

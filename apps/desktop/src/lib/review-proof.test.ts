@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import type { FindingEvidence } from "@/lib/synthetic-qa/apply-evidence";
+import type { CliReviewFinding } from "@/lib/tauri-ipc";
+
 import {
   buildCodebaseHistoryExplanations,
   buildFindingHunkNoteMarkdown,
   buildFocusedReviewMemoryGraph,
   buildQaPostFixComparison,
+  buildRevalidationChecklist,
   buildReviewerProofMarkdown,
   buildVerificationTimeline,
   formatHistoryCommandEvidence,
@@ -1183,5 +1187,74 @@ describe("buildReviewerProofMarkdown", () => {
     assert.match(note, /Fix the reproduced issue and attach fresh proof/);
     assert.doesNotMatch(note, /Spot-check adjacent files/);
     assert.match(note, /Agent-context instruction/);
+  });
+});
+
+describe("buildRevalidationChecklist", () => {
+  const finding: CliReviewFinding = {
+    severity: "high",
+    title: "Checkout button hidden",
+    summary: "Button sits behind the sticky footer.",
+    filePath: "src/Checkout.tsx",
+    line: 42,
+  };
+  const evidence = (overrides: Partial<FindingEvidence>): FindingEvidence => ({
+    level: "static",
+    status: "fixed",
+    artifact: "",
+    notes: "",
+    revalidation: {},
+    ...overrides,
+  });
+
+  it("anchors the original-failure check to the finding location", () => {
+    const items = buildRevalidationChecklist(finding, evidence({}));
+    assert.match(items[0].label, /no longer reproduces at src\/Checkout\.tsx:42/);
+  });
+
+  it("asks to re-run a recorded artifact when one exists", () => {
+    const items = buildRevalidationChecklist(
+      finding,
+      evidence({ level: "browser", artifact: "artifacts/checkout.png" }),
+    );
+    const ids = items.map((item) => item.id);
+    assert.ok(ids.includes("rerun-artifact"));
+    assert.ok(!ids.includes("capture-artifact"));
+  });
+
+  it("asks to capture a fresh artifact for non-static evidence without one", () => {
+    const ids = buildRevalidationChecklist(
+      finding,
+      evidence({ level: "runtime", artifact: "" }),
+    ).map((item) => item.id);
+    assert.ok(ids.includes("capture-artifact"));
+    assert.ok(ids.includes("watch-runtime"));
+  });
+
+  it("adds a regression-test reminder for static-only signals", () => {
+    const ids = buildRevalidationChecklist(finding, evidence({ level: "static" })).map(
+      (item) => item.id,
+    );
+    assert.ok(ids.includes("add-regression-test"));
+    // Static evidence with no artifact should not ask to capture a fresh one.
+    assert.ok(!ids.includes("capture-artifact"));
+  });
+
+  it("adds a browser walkthrough and notes recheck when notes exist", () => {
+    const ids = buildRevalidationChecklist(
+      finding,
+      evidence({ level: "browser", artifact: "a.png", notes: "Console error on load" }),
+    ).map((item) => item.id);
+    assert.ok(ids.includes("rerun-browser-flow"));
+    assert.ok(ids.includes("recheck-notes"));
+    assert.ok(ids.includes("scan-neighbors"));
+  });
+
+  it("falls back to a generic original-failure check without a location", () => {
+    const items = buildRevalidationChecklist(
+      { ...finding, filePath: undefined, line: undefined },
+      evidence({}),
+    );
+    assert.match(items[0].label, /originally-described failure no longer reproduces/);
   });
 });

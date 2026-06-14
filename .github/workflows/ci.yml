@@ -16,3 +16,6 @@ jobs:
       - name: Type Check
         working-directory: apps/desktop
         run: npx tsc --noEmit
+      - name: Unit Tests
+        working-directory: apps/desktop
+        run: npm run test:unit

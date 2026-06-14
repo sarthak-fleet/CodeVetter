@@ -1,6 +1,6 @@
 {
   "name": "@code-reviewer/desktop",
-  "version": "1.1.54",
+  "version": "1.1.55",
   "private": true,
   "scripts": {
     "dev": "lsof -ti:1420 | xargs kill -9 2>/dev/null; vite",
@@ -10,6 +10,7 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "test": "npx playwright test",
+    "test:unit": "node --import tsx --test \"src/**/*.test.ts\"",
     "test:e2e": "npx playwright test",
     "test:e2e:ui": "npx playwright test --ui",
     "test:e2e:tauri": "node --import tsx --test tests/e2e/app.tauri-spec.ts",
