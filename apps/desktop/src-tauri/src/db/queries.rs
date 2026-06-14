@@ -500,18 +500,23 @@ pub fn upsert_session(conn: &Connection, s: &SessionInput) -> Result<(), rusqlit
             cli_version        = COALESCE(excluded.cli_version, cc_sessions.cli_version),
             first_message      = COALESCE(excluded.first_message, cc_sessions.first_message),
             last_message       = COALESCE(excluded.last_message, cc_sessions.last_message),
-            message_count      = COALESCE(excluded.message_count, cc_sessions.message_count),
-            total_input_tokens = COALESCE(excluded.total_input_tokens, cc_sessions.total_input_tokens),
-            total_output_tokens= COALESCE(excluded.total_output_tokens, cc_sessions.total_output_tokens),
+            -- Numeric columns are bound as 0 (not NULL) when unknown — e.g. the
+            -- startup *quick* index re-upserts changed sessions with no token
+            -- counts. So preserve the existing value when the incoming one is 0,
+            -- otherwise the quick index would wipe the full index's real counts
+            -- on every launch (Claude collapsing to ~0 until the full re-index).
+            message_count      = CASE WHEN excluded.message_count > 0 THEN excluded.message_count ELSE cc_sessions.message_count END,
+            total_input_tokens = CASE WHEN excluded.total_input_tokens > 0 THEN excluded.total_input_tokens ELSE cc_sessions.total_input_tokens END,
+            total_output_tokens= CASE WHEN excluded.total_output_tokens > 0 THEN excluded.total_output_tokens ELSE cc_sessions.total_output_tokens END,
             model_used         = COALESCE(excluded.model_used, cc_sessions.model_used),
             slug               = COALESCE(excluded.slug, cc_sessions.slug),
-            file_size_bytes    = COALESCE(excluded.file_size_bytes, cc_sessions.file_size_bytes),
+            file_size_bytes    = CASE WHEN excluded.file_size_bytes > 0 THEN excluded.file_size_bytes ELSE cc_sessions.file_size_bytes END,
             indexed_at         = COALESCE(excluded.indexed_at, cc_sessions.indexed_at),
             file_mtime         = COALESCE(excluded.file_mtime, cc_sessions.file_mtime),
-            cache_read_tokens  = COALESCE(excluded.cache_read_tokens, cc_sessions.cache_read_tokens),
-            cache_creation_tokens = COALESCE(excluded.cache_creation_tokens, cc_sessions.cache_creation_tokens),
-            compaction_count   = COALESCE(excluded.compaction_count, cc_sessions.compaction_count),
-            estimated_cost_usd = COALESCE(excluded.estimated_cost_usd, cc_sessions.estimated_cost_usd)",
+            cache_read_tokens  = CASE WHEN excluded.cache_read_tokens > 0 THEN excluded.cache_read_tokens ELSE cc_sessions.cache_read_tokens END,
+            cache_creation_tokens = CASE WHEN excluded.cache_creation_tokens > 0 THEN excluded.cache_creation_tokens ELSE cc_sessions.cache_creation_tokens END,
+            compaction_count   = CASE WHEN excluded.compaction_count > 0 THEN excluded.compaction_count ELSE cc_sessions.compaction_count END,
+            estimated_cost_usd = CASE WHEN excluded.estimated_cost_usd > 0 THEN excluded.estimated_cost_usd ELSE cc_sessions.estimated_cost_usd END",
         params![
             s.id,
             s.project_id,
@@ -1912,6 +1917,79 @@ pub fn list_talks_for_project(
 mod tests {
     use super::*;
     use crate::db::schema;
+
+    #[test]
+    fn quick_index_zero_tokens_do_not_wipe_full_counts() {
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::run_migrations(&conn).expect("schema");
+        upsert_project(
+            &conn,
+            &ProjectInput {
+                id: "p".to_string(),
+                display_name: "P".to_string(),
+                dir_path: "/p".to_string(),
+                session_count: None,
+                last_activity: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+        )
+        .expect("project");
+
+        let full = |input, output, msgs, cache, mtime: &str, cwd: Option<&str>| SessionInput {
+            id: "s".to_string(),
+            project_id: "p".to_string(),
+            agent_type: Some("claude-code".to_string()),
+            jsonl_path: Some("/p/s.jsonl".to_string()),
+            git_branch: None,
+            cwd: cwd.map(String::from),
+            cli_version: None,
+            first_message: None,
+            last_message: None,
+            message_count: msgs,
+            total_input_tokens: input,
+            total_output_tokens: output,
+            model_used: None,
+            slug: None,
+            file_size_bytes: None,
+            indexed_at: None,
+            file_mtime: Some(mtime.to_string()),
+            cache_read_tokens: cache,
+            cache_creation_tokens: None,
+            compaction_count: None,
+            estimated_cost_usd: None,
+        };
+
+        // Full index writes the real counts.
+        upsert_session(
+            &conn,
+            &full(Some(1_000_000), Some(2_000), Some(50), Some(900_000), "m1", None),
+        )
+        .expect("full upsert");
+
+        // Quick index re-upserts the same (mtime-changed) session with unknown
+        // counts (None -> bound as 0) but fresh metadata.
+        upsert_session(
+            &conn,
+            &full(None, None, None, None, "m2", Some("/repo/cwd")),
+        )
+        .expect("quick upsert");
+
+        let (inp, outp, msgs, cache, cwd): (i64, i64, i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT total_input_tokens, total_output_tokens, message_count, cache_read_tokens, cwd FROM cc_sessions WHERE id='s'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("row");
+
+        // The quick index must NOT wipe the full index's counts to 0.
+        assert_eq!(inp, 1_000_000, "input tokens preserved");
+        assert_eq!(outp, 2_000, "output tokens preserved");
+        assert_eq!(msgs, 50, "message count preserved");
+        assert_eq!(cache, 900_000, "cache tokens preserved");
+        // Metadata from the quick pass still updates.
+        assert_eq!(cwd.as_deref(), Some("/repo/cwd"));
+    }
 
     #[test]
     fn review_procedure_event_round_trips_for_review() {
