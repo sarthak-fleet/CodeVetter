@@ -24,7 +24,6 @@ import type {
   AgentUsageRow,
   LiveUsageResult,
   ProviderAccount,
-  ProviderUsageLedgerRow,
   SessionAdapterRun,
   SessionScorecard,
   TokenUsageStats,
@@ -39,7 +38,6 @@ import {
   getTokenUsageStats,
   isTauriAvailable,
   listProviderAccounts,
-  listProviderUsageLedger,
   triggerIndex,
 } from "@/lib/tauri-ipc";
 
@@ -617,7 +615,6 @@ let _cachedDashboard: {
   accounts: ProviderAccount[];
   usages: Record<string, AccountUsage>;
   liveUsages: Record<string, LiveUsageResult>;
-  usageLedger: ProviderUsageLedgerRow[];
   fetchedAt: number;
 } | null = null;
 
@@ -889,13 +886,6 @@ function TokenUsageChart({
 // Codex are ~96-98% cache reads, so the raw input total wildly overstates one
 // agent's share. Grok/Cursor token counts are per-turn-context estimates.
 
-// Provider-keyed palette for the live provider-telemetry ledger below.
-const PROVIDER_PALETTE: Record<string, { bar: string; dot: string; label: string }> = {
-  anthropic: { bar: "#d6a947", dot: "bg-amber-400", label: "Claude" },
-  openai: { bar: "#31c6b7", dot: "bg-emerald-400", label: "Codex" },
-  cursor: { bar: "#a78bfa", dot: "bg-violet-400", label: "Cursor" },
-};
-
 const AGENT_PALETTE: Record<string, { bar: string; label: string; estimated?: boolean }> = {
   "claude-code": { bar: "#d6a947", label: "Claude" },
   codex: { bar: "#31c6b7", label: "Codex" },
@@ -1011,71 +1001,6 @@ function WeeklyAgentSplit() {
           * estimated from per-turn context — agent logs no cumulative token billing
         </div>
       )}
-    </Card>
-  );
-}
-
-function ProviderUsageLedgerPreview({
-  rows,
-}: {
-  rows: ProviderUsageLedgerRow[];
-}) {
-  if (rows.length === 0) {
-    return null;
-  }
-
-  return (
-    <Card className="rounded-none border-0 bg-transparent p-4 shadow-none">
-      <div className="mb-2.5">
-        <div className="text-[11px] text-slate-500">Provider usage ledger</div>
-        <div className="text-xs text-slate-400">
-          Source-window rows for live/local provider telemetry
-        </div>
-      </div>
-      <div className="overflow-hidden rounded-md border border-[#1a1a1a]">
-        {rows.slice(0, 5).map((row) => {
-          const palette = PROVIDER_PALETTE[row.provider] ?? {
-            bar: "#64748b",
-            dot: "bg-slate-400",
-            label: row.provider,
-          };
-          return (
-            <div
-              key={row.id}
-              className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1.5fr)_auto] gap-3 border-b border-[#1a1a1a] bg-[#08090a] px-3 py-2.5 last:border-b-0"
-            >
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5 text-xs text-slate-200">
-                  <span
-                    className="h-2 w-2 rounded-full"
-                    style={{ backgroundColor: palette.bar }}
-                  />
-                  <span>{palette.label}</span>
-                </div>
-                <div className="mt-1 truncate font-mono text-[10px] text-slate-600">
-                  {row.source}
-                </div>
-              </div>
-              <div className="min-w-0 text-[11px] text-slate-500">
-                <div className="truncate">
-                  {row.granularity} · {row.confidence}
-                </div>
-                <div className="truncate">
-                  {formatShortDateTime(row.window_start)} → {formatShortDateTime(row.window_end)}
-                </div>
-              </div>
-              <div className="text-right">
-                <div className="text-xs font-semibold tabular-nums text-slate-200">
-                  {formatTokens(row.total_tokens)}
-                </div>
-                <div className="text-[10px] tabular-nums text-slate-600">
-                  {formatTokens(row.input_tokens)} in / {formatTokens(row.output_tokens)} out
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
     </Card>
   );
 }
@@ -1554,7 +1479,6 @@ export default function Home() {
   const [accountUsages, setAccountUsages] = useState<Record<string, AccountUsage>>(_cachedDashboard?.usages ?? {});
   const [liveUsages, setLiveUsages] = useState<Record<string, LiveUsageResult>>(_cachedDashboard?.liveUsages ?? {});
   const [liveErrors, setLiveErrors] = useState<Record<string, string>>({});
-  const [usageLedger, setUsageLedger] = useState<ProviderUsageLedgerRow[]>(_cachedDashboard?.usageLedger ?? []);
   const [checkingLiveFor, setCheckingLiveFor] = useState<string | null>(null);
 
   // UI state — skip loading spinner if we have cached data
@@ -1587,7 +1511,6 @@ export default function Home() {
         tokenUsageResult,
         accountsResult,
         cachedUsagesResult,
-        usageLedgerResult,
       ] = await Promise.all([
         getTokenUsageStats().then(
           (v) => ({ status: "fulfilled" as const, value: v }),
@@ -1601,17 +1524,10 @@ export default function Home() {
             (e) => ({ status: "rejected" as const, reason: e })
           ),
         cachedUsagePromise,
-        listProviderUsageLedger(12).then(
-          (v) => ({ status: "fulfilled" as const, value: v }),
-          (e) => ({ status: "rejected" as const, reason: e })
-        ),
       ]);
 
       if (tokenUsageResult.status === "fulfilled") {
         setTokenUsage(tokenUsageResult.value);
-      }
-      if (usageLedgerResult.status === "fulfilled") {
-        setUsageLedger(usageLedgerResult.value);
       }
 
       // Seed usage map with cached-ID results that came back alongside the rest.
@@ -1684,10 +1600,9 @@ export default function Home() {
       accounts,
       usages: accountUsages,
       liveUsages,
-      usageLedger,
       fetchedAt: Date.now(),
     };
-  }, [loading, tokenUsage, accounts, accountUsages, liveUsages, usageLedger]);
+  }, [loading, tokenUsage, accounts, accountUsages, liveUsages]);
 
   // Refresh without showing loading spinners (for background event updates)
   const refreshDashboard = useCallback(() => {
@@ -1750,10 +1665,6 @@ export default function Home() {
       });
       return next;
     });
-    const rows = await listProviderUsageLedger(12).catch(() => null);
-    if (rows) {
-      setUsageLedger(rows);
-    }
   }, []);
 
   useEffect(() => {
@@ -1896,7 +1807,6 @@ export default function Home() {
             weekly={tokenUsage.weekly_series}
           />
           <WeeklyAgentSplit />
-          <ProviderUsageLedgerPreview rows={usageLedger} />
         </div>
       )}
 
@@ -1980,10 +1890,6 @@ export default function Home() {
                         delete next[account.id];
                         return next;
                       });
-                      const rows = await listProviderUsageLedger(12).catch(() => null);
-                      if (rows) {
-                        setUsageLedger(rows);
-                      }
                     } catch (err) {
                       setLiveErrors((prev) => ({ ...prev, [account.id]: String(err) }));
                     } finally {
