@@ -22,7 +22,8 @@ import {
 // headers cost a live API request per check.
 const DEFAULT_CADENCE_SECS = 120;
 
-const SUPPORTED_PROVIDERS = new Set(["anthropic", "openai", "google"]);
+// "google" (Gemini) intentionally excluded — Gemini usage tracking is disabled.
+const SUPPORTED_PROVIDERS = new Set(["anthropic", "openai"]);
 
 // Thresholds (worst-window utilization %) that should fire a desktop
 // notification. Each (accountId × window × threshold) only fires once per app

@@ -434,9 +434,12 @@ pub async fn detect_provider_accounts(db: State<'_, DbState>) -> Result<Value, S
     }
 
     // ── Detect Gemini / Google accounts ──────────────────────────────────
-    if let Some(acc) = detect_gemini().await {
-        detected.push(acc);
-    }
+    // Disabled per owner request — Gemini usage is not tracked. Detection,
+    // live-usage, and display paths remain in the codebase but no google
+    // account is surfaced, so the dashboard no longer represents Gemini.
+    // if let Some(acc) = detect_gemini().await {
+    //     detected.push(acc);
+    // }
 
     // ── Detect Cursor (IDE-installed, no OAuth) ──────────────────────────
     if let Some(acc) = detect_cursor_account() {
@@ -603,6 +606,8 @@ async fn detect_claude_accounts() -> Vec<DetectedAccount> {
 }
 
 /// Detect Gemini CLI account from `~/.gemini/oauth_creds.json`.
+/// Currently unused — Gemini detection is disabled (see `detect_accounts`).
+#[allow(dead_code)]
 async fn detect_gemini() -> Option<DetectedAccount> {
     let home = std::env::var("HOME").ok()?;
     let creds_path = std::path::PathBuf::from(&home).join(".gemini/oauth_creds.json");
