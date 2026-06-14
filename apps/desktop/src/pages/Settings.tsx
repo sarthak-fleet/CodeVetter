@@ -575,6 +575,25 @@ export default function Settings() {
   const [notifyQuotaThresholds, toggleNotifyQuotaThresholds] = useBoolPref("notify_quota_thresholds", true);
   const [notifySessionUsageThresholds, toggleNotifySessionUsageThresholds] = useBoolPref("notify_session_usage_thresholds", true);
 
+  // Real app version (from tauri.conf.json) — the About panel previously
+  // hard-coded "0.1.0" so it never reflected releases.
+  const [appVersion, setAppVersion] = useState<string>("");
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { getVersion } = await import("@tauri-apps/api/app");
+        const v = await getVersion();
+        if (!cancelled) setAppVersion(v);
+      } catch {
+        // Not running under Tauri — leave blank.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Menu-bar tray
   const [trayCadence, setTrayCadence] = usePref("tray_refresh_cadence_secs", "120");
 
@@ -955,7 +974,7 @@ export default function Settings() {
               <div className="flex flex-col gap-2 py-4">
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-slate-400">Version</span>
-                  <span className="mono text-sm text-slate-200">0.1.0</span>
+                  <span className="mono text-sm text-slate-200">{appVersion || "—"}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-slate-400">Build</span>
