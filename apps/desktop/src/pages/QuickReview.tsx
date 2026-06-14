@@ -725,6 +725,26 @@ function sameHistoryFile(historyFile: string, findingFile: string) {
   return left === right || left.endsWith(`/${right}`) || right.endsWith(`/${left}`);
 }
 
+/**
+ * Fire a desktop notification if the matching Settings toggle is enabled.
+ * `defaultOn` mirrors the toggle's default so an unset preference behaves like
+ * the Settings UI. Best-effort: never throws into the calling flow.
+ */
+async function notifyIfEnabled(
+  prefKey: string,
+  defaultOn: boolean,
+  title: string,
+  body: string,
+): Promise<void> {
+  try {
+    const raw = await getPreference(prefKey);
+    const enabled = raw == null ? defaultOn : raw === "true";
+    if (enabled) await sendTrayNotification(title, body);
+  } catch {
+    // Notifications are best-effort; ignore permission/plugin failures.
+  }
+}
+
 function parseDiffIntoFiles(diff: string): DiffFile[] {
   if (!diff.trim()) return [];
   const files: DiffFile[] = [];
@@ -1304,20 +1324,13 @@ export default function QuickReview() {
       setSelectedFindings(new Set());
       // Core action: a code review run completed (also fires `activated` once).
       trackCoreAction("review_run");
-      // Fire the "Review Completed" desktop notification (default-on, like the
-      // tray monitor's quota notifications). Best-effort — never block the flow.
-      void getPreference("notify_review_done")
-        .then((raw) => {
-          if (raw === "false") return;
-          const count = res.findings_count ?? res.findings.length;
-          return sendTrayNotification(
-            "Review complete",
-            `${count} finding${count === 1 ? "" : "s"} · score ${Math.round(res.score)}/100 · ${res.diff_range || diffRange}`,
-          );
-        })
-        .catch(() => {
-          // Notifications are best-effort; ignore permission/plugin failures.
-        });
+      const count = res.findings_count ?? res.findings.length;
+      void notifyIfEnabled(
+        "notify_review_done",
+        true,
+        "Review complete",
+        `${count} finding${count === 1 ? "" : "s"} · score ${Math.round(res.score)}/100 · ${res.diff_range || diffRange}`,
+      );
       await blastPromise;
     } catch (e) {
       console.error("[CodeVetter] CLI review failed:", e);
@@ -1327,6 +1340,12 @@ export default function QuickReview() {
       } else {
         setError(
           "The review couldn't finish. The AI agent may have failed or timed out — check the agent is installed and try again.",
+        );
+        void notifyIfEnabled(
+          "notify_agent_error",
+          true,
+          "Review failed",
+          "The AI agent failed or timed out during the review.",
         );
       }
     } finally {
@@ -2683,6 +2702,12 @@ export default function QuickReview() {
       const completedAt = new Date().toISOString();
       setFixResult(res);
       setFixCompletedAt(completedAt);
+      void notifyIfEnabled(
+        "notify_task_complete",
+        false,
+        "Fix complete",
+        `${res.findings_fixed} finding${res.findings_fixed === 1 ? "" : "s"} fixed across ${res.changed_files.length} file${res.changed_files.length === 1 ? "" : "s"}.`,
+      );
       recordProcedureExecutionEvents(
         procedureEventsForFixResult(activeProcedureSteps, res),
         {
@@ -2709,6 +2734,12 @@ export default function QuickReview() {
       }
     } catch (e) {
       setError(`Fix failed: ${String(e)}`);
+      void notifyIfEnabled(
+        "notify_agent_error",
+        true,
+        "Fix failed",
+        "The AI agent failed while applying the selected fixes.",
+      );
     } finally {
       setIsFixing(null);
       unlisten?.();

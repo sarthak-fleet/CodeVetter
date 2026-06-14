@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::BufRead;
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 static FULL_INDEX_LOCK: Mutex<()> = Mutex::new(());
 
@@ -178,17 +178,20 @@ pub fn emit_session_archive_updated(app: &AppHandle, summary: &FullIndexSummary)
 }
 
 #[tauri::command]
-pub async fn trigger_index(app: AppHandle, db: State<'_, DbState>) -> Result<Value, String> {
-    // Run the full index on a blocking thread: it reads + parses every session
-    // JSONL and writes SQLite synchronously, which would otherwise stall the
-    // Tauri async runtime worker for the whole (cold) index.
-    let conn = db.0.clone();
+pub async fn trigger_index(app: AppHandle) -> Result<Value, String> {
+    // Index against a private WAL connection on a blocking thread — exactly the
+    // pattern the periodic/startup indexer already uses (main.rs:run_full_index).
+    // This keeps the full (cold) index off both the async runtime worker AND the
+    // shared DbState connection lock, so other DB-backed commands stay responsive
+    // during a manual re-index. FULL_INDEX_LOCK (held inside
+    // run_full_index_summary_with_conn) still serializes against the periodic run.
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("failed to resolve app data dir: {e}"))?;
     let summary = tokio::task::spawn_blocking(move || {
-        let conn = conn.lock().map_err(|e| e.to_string())?;
-        let _index_guard = FULL_INDEX_LOCK
-            .lock()
-            .map_err(|e| format!("full index lock poisoned: {e}"))?;
-        run_full_index_unlocked(&conn)
+        let conn = crate::db::init_db(app_data_dir).map_err(|e| e.to_string())?;
+        run_full_index_summary_with_conn(&conn)
     })
     .await
     .map_err(|e| format!("index task join error: {e}"))??;
