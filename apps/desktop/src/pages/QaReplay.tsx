@@ -1,6 +1,7 @@
-import { CheckCircle2, ChevronRight, FlaskConical, XCircle } from "lucide-react";
+import { Bot, CheckCircle2, ChevronRight, FlaskConical, XCircle } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { LiveAgentRunner } from "@/components/LiveAgentRunner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -8,6 +9,8 @@ import { Separator } from "@/components/ui/separator";
 import { runFixture } from "@/lib/synthetic-qa/fixture-runner";
 import { SYNTHETIC_QA_FIXTURES } from "@/lib/synthetic-qa/fixtures";
 import type { SyntheticQaRunResult } from "@/lib/synthetic-qa/types";
+
+type TrackMode = "fixture" | "live";
 
 interface FixtureRun {
   fixture_id: string;
@@ -29,11 +32,14 @@ export default function QaReplay() {
   const initial = useMemo(() => replayAll(), []);
   const [runs, setRuns] = useState<FixtureRun[]>(initial);
   const [selectedId, setSelectedId] = useState<string>(initial[0]?.fixture_id ?? "");
+  const [mode, setMode] = useState<TrackMode>("fixture");
   const selected = runs.find((r) => r.fixture_id === selectedId) ?? runs[0];
 
   function rerun() {
     setRuns(replayAll());
   }
+
+  const isFixture = mode === "fixture";
 
   return (
     <div className="min-h-screen bg-[var(--bg-main)] px-6 py-16 text-slate-100">
@@ -41,28 +47,84 @@ export default function QaReplay() {
         <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div>
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-cyan-400/25 bg-cyan-400/10 text-cyan-200">
-                <FlaskConical size={20} />
+              <div
+                className={`flex h-10 w-10 items-center justify-center rounded-2xl border ${
+                  isFixture
+                    ? "border-cyan-400/25 bg-cyan-400/10 text-cyan-200"
+                    : "border-violet-400/25 bg-violet-400/10 text-violet-200"
+                }`}
+              >
+                {isFixture ? <FlaskConical size={20} /> : <Bot size={20} />}
               </div>
-              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-200">
-                Prototype · Synthetic QA replay
+              <p
+                className={`text-xs font-semibold uppercase tracking-[0.24em] ${
+                  isFixture ? "text-cyan-200" : "text-violet-200"
+                }`}
+              >
+                Testing tracks
               </p>
             </div>
             <h1 className="mt-4 text-3xl font-semibold tracking-tight">
-              Fixture-backed QA replay
+              {isFixture ? "Fixture-backed QA replay" : "Live browser agent"}
             </h1>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">
-              Deterministic replays of recorded user flows against captured DOM
-              snapshots. No live browser, no network. Use this surface to triage
-              whether an app flow still produces the expected observations.
+              {isFixture
+                ? "Deterministic replays of recorded user flows against captured DOM snapshots. No live browser, no network. Use this surface to triage whether an app flow still produces the expected observations."
+                : "An AI agent drives the user's installed Chrome through a real flow. Brain calls route through ../local-ai (no API key). Use this to find where a real visitor — or another agent — would actually get stuck."}
             </p>
           </div>
-          <Button type="button" onClick={rerun}>
-            Re-run all fixtures
-          </Button>
+          {isFixture && (
+            <Button type="button" onClick={rerun}>
+              Re-run all fixtures
+            </Button>
+          )}
         </header>
 
-        <div className="grid gap-5 lg:grid-cols-[1fr_1.4fr]">
+        <div className="inline-flex rounded-md border border-[#1a1a1a] bg-[#08090d] p-1 text-xs">
+          {(["fixture", "live"] as const).map((m) => {
+            const active = m === mode;
+            return (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setMode(m)}
+                className={`flex items-center gap-2 rounded px-3 py-1.5 transition-colors ${
+                  active
+                    ? m === "fixture"
+                      ? "bg-cyan-400/10 text-cyan-100"
+                      : "bg-violet-400/10 text-violet-100"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {m === "fixture" ? <FlaskConical size={12} /> : <Bot size={12} />}
+                {m === "fixture" ? "Fixture replay" : "Live agent"}
+              </button>
+            );
+          })}
+        </div>
+
+        {mode === "live" && <LiveAgentRunner />}
+        {mode === "fixture" && (
+          <FixtureTrack
+            runs={runs}
+            selected={selected}
+            setSelectedId={setSelectedId}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface FixtureTrackProps {
+  runs: FixtureRun[];
+  selected: FixtureRun | undefined;
+  setSelectedId: (id: string) => void;
+}
+
+function FixtureTrack({ runs, selected, setSelectedId }: FixtureTrackProps) {
+  return (
+    <div className="grid gap-5 lg:grid-cols-[1fr_1.4fr]">
           <section className="space-y-3">
             {runs.map((run) => {
               const active = run.fixture_id === selected?.fixture_id;
@@ -194,8 +256,6 @@ export default function QaReplay() {
               </section>
             </Card>
           )}
-        </div>
-      </div>
     </div>
   );
 }

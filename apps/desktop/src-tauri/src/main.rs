@@ -1,6 +1,7 @@
 // Prevent a console window from popping up on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent;
 mod commands;
 mod db;
 mod talk;
@@ -258,6 +259,8 @@ fn main() {
             commands::synthetic_qa::discover_playwright_specs,
             commands::synthetic_qa::record_synthetic_qa_run,
             commands::synthetic_qa::list_synthetic_qa_runs,
+            // Live browser agent (drives real Chrome via chromiumoxide)
+            commands::agent::agent_run_task,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

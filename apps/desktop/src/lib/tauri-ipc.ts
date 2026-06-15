@@ -1992,3 +1992,73 @@ export async function runSyntheticQa(
     repoTraceMode: options?.repoTraceMode ?? null,
   });
 }
+
+// ─── Live Browser Agent ──────────────────────────────────────────────────────
+// Drives the user's installed Chrome via chromiumoxide; routes brain calls
+// through ../local-ai (claude/codex). Streams per-step events on `agent:step`.
+
+export type AgentActionType =
+  | "click"
+  | "type"
+  | "key"
+  | "scroll"
+  | "goto"
+  | "done"
+  | "give_up";
+
+export type AgentAction =
+  | { type: "click"; selector: string; reasoning: string }
+  | { type: "type"; selector: string; text: string; reasoning: string }
+  | { type: "key"; key: string; reasoning: string }
+  | { type: "scroll"; delta: number; reasoning: string }
+  | { type: "goto"; url: string; reasoning: string }
+  | { type: "done"; reasoning: string }
+  | { type: "give_up"; reasoning: string };
+
+export interface AgentStep {
+  index: number;
+  action: AgentAction;
+  url: string;
+  page_title: string;
+  screenshot_path: string | null;
+  /** `data:image/png;base64,…` so the trace UI can render the shot inline. */
+  screenshot_data_url: string | null;
+  elapsed_ms: number;
+  error: string | null;
+}
+
+export interface AgentRunInput {
+  url: string;
+  goal: string;
+  persona?: string | null;
+  provider: "claude" | "codex" | "gemini";
+  model?: string | null;
+  max_steps?: number | null;
+  /** When set, the agent spawns the project's dev command (npm run dev /
+   *  npm start) and waits for `url` to respond before driving the browser. */
+  project_dir?: string | null;
+}
+
+export interface AgentRunResult {
+  run_id: string;
+  goal: string;
+  completed: boolean;
+  gave_up: boolean;
+  step_count: number;
+  final_url: string;
+  final_title: string;
+  duration_ms: number;
+  steps: AgentStep[];
+  error: string | null;
+}
+
+export async function agentRunTask(input: AgentRunInput): Promise<AgentRunResult> {
+  return safeInvoke<AgentRunResult>("agent_run_task", { input });
+}
+
+/** Subscribe to streaming agent steps for the current run. */
+export async function listenToAgentSteps(
+  handler: (step: AgentStep) => void,
+): Promise<UnlistenFn> {
+  return listen<AgentStep>("agent:step", (evt) => handler(evt.payload));
+}
