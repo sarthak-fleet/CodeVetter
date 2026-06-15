@@ -5,6 +5,7 @@
 
 pub mod brain;
 pub mod browser;
+pub mod cli_brain;
 pub mod local_server;
 pub mod prompts;
 pub mod runner;

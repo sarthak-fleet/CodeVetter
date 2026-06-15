@@ -9,27 +9,52 @@ use uuid::Uuid;
 
 use super::brain::{Brain, BrainContext, LocalAiBrain};
 use super::browser::Browser;
+use super::cli_brain::CliBrain;
 use super::local_server::LocalServer;
 use super::types::{AgentAction, AgentRunInput, AgentRunResult, AgentStep};
 
 const DEFAULT_MAX_STEPS: u32 = 30;
 const MAX_CONSECUTIVE_BRAIN_FAILURES: u32 = 2;
 const STEP_EVENT: &str = "agent:step";
+const LOCAL_AI_HEALTH_URL: &str = "http://localhost:3456/health";
 
 pub async fn run_agent_task(
     app: AppHandle,
     input: AgentRunInput,
 ) -> Result<AgentRunResult, String> {
-    let brain = LocalAiBrain::new(input.provider.clone(), input.model.clone());
-    run_with_brain(app, input, brain).await
+    // Prefer the shared local-ai gateway when it's running (dev mode); fall
+    // back to spawning the CLI directly from Rust (shipped DMG, no Node).
+    if local_ai_reachable().await {
+        let brain = LocalAiBrain::new(input.provider.clone(), input.model.clone());
+        run_with_brain(app, input, brain, "local-ai").await
+    } else {
+        let brain = CliBrain::new(input.provider.clone(), input.model.clone());
+        run_with_brain(app, input, brain, "cli").await
+    }
+}
+
+async fn local_ai_reachable() -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_millis(400))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    matches!(
+        client.get(LOCAL_AI_HEALTH_URL).send().await,
+        Ok(resp) if resp.status().is_success()
+    )
 }
 
 /// Generic over the brain so tests and future providers can swap in their
-/// own `Brain` impl without touching the loop.
+/// own `Brain` impl without touching the loop. `brain_used` is echoed into
+/// the result so the UI can render which backend actually drove the run.
 pub async fn run_with_brain<B: Brain>(
     app: AppHandle,
     input: AgentRunInput,
     brain: B,
+    brain_used: &str,
 ) -> Result<AgentRunResult, String> {
     let run_id = Uuid::new_v4().to_string();
     let started = Instant::now();
@@ -175,6 +200,7 @@ pub async fn run_with_brain<B: Brain>(
         duration_ms: started.elapsed().as_millis() as u64,
         steps,
         error: None,
+        brain_used: brain_used.to_string(),
     })
 }
 
