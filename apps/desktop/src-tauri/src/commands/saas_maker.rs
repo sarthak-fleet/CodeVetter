@@ -1059,6 +1059,50 @@ fn read_origin_url(repo_path: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Shared changelog helper called from both saas_maker.rs and fleet.rs.
+/// Hits `POST /v1/changelog/dashboard/{project_id}` with the user's Bearer
+/// token. Returns the created changelog entry as JSON for the UI to render.
+pub(crate) async fn push_changelog_helper(
+    db: &State<'_, DbState>,
+    input: crate::commands::fleet::PushChangelogInput,
+) -> Result<serde_json::Value, String> {
+    let (token, _) = resolve_token(db);
+    let token = token.ok_or_else(|| {
+        format!("SaaS Maker not configured. Set {TOKEN_ENV} or use Settings.")
+    })?;
+    let base = resolve_base_url(db);
+    let url = format!(
+        "{base}/v1/changelog/dashboard/{}",
+        urlencode(&input.project_id)
+    );
+    let payload = serde_json::json!({
+        "title": input.title,
+        "content": input.content,
+        "version": input.version,
+        "type": input.r#type.clone().unwrap_or_else(|| "improvement".into()),
+        "published": input.published.unwrap_or(false),
+        "source": "codevetter",
+        "agent": "codevetter-cli",
+    });
+    let resp = client()?
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("POST {url} failed: {e}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "POST {url} returned {status}: {}",
+            body.chars().take(400).collect::<String>()
+        ));
+    }
+    serde_json::from_str(&body)
+        .map_err(|e| format!("changelog response not JSON: {e}"))
+}
+
 fn lookup_local_repo_mapping(db: &State<'_, DbState>, repo_path: &str) -> Option<String> {
     let conn = db.0.lock().ok()?;
     conn.query_row(

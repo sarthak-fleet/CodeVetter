@@ -399,6 +399,13 @@ fn classify_commit(c: &ParsedCommit) -> (&'static str, bool) {
 pub async fn attribute_repo_commits(
     repo_path: String,
 ) -> Result<RepoAttributionReport, String> {
+    attribute_repo_path(&repo_path)
+}
+
+/// Synchronous in-process variant of `attribute_repo_commits`. Other commands
+/// (`fleet::get_fleet_rollup`) call this directly to iterate over many repos
+/// without going through the Tauri IPC layer.
+pub(crate) fn attribute_repo_path(repo_path: &str) -> Result<RepoAttributionReport, String> {
     let trimmed = repo_path.trim().to_string();
     if trimmed.is_empty() {
         return Err("repo_path is empty".to_string());
@@ -406,6 +413,71 @@ pub async fn attribute_repo_commits(
     let raw = run_git_log(&trimmed)?;
     let commits = parse_git_log(&raw);
     Ok(summarize(trimmed, &commits))
+}
+
+/// Find the timestamp of the first AI-attributed commit in the repo, plus
+/// the commits-per-day rate before and after. Returns None if no AI commit
+/// is found or the history is too short to make a meaningful before/after
+/// comparison (< 7 days on either side).
+pub(crate) fn compute_ai_acceleration(repo_path: &str) -> Option<AiAcceleration> {
+    let raw = run_git_log(repo_path).ok()?;
+    let commits = parse_git_log(&raw);
+    let mut classified: Vec<(i64, bool)> = commits
+        .iter()
+        .map(|c| (c.timestamp, classify_commit(c).1))
+        .collect();
+    classified.sort_by_key(|(ts, _)| *ts);
+
+    let first_ai_ts = classified.iter().find(|(_, is_ai)| *is_ai).map(|(ts, _)| *ts)?;
+    let earliest = classified.first()?.0;
+    let latest = classified.last()?.0;
+
+    let before_days = ((first_ai_ts - earliest) as f64 / 86_400.0).max(0.0);
+    let after_days = ((latest - first_ai_ts) as f64 / 86_400.0).max(0.0);
+    if before_days < 7.0 || after_days < 7.0 {
+        return None;
+    }
+
+    // Per-day commit rates, counted as "commits whose timestamp is strictly
+    // before / on-or-after the first AI commit". Includes AI commits in the
+    // after window — they're the cause of the acceleration we're measuring.
+    let before_count = classified.iter().filter(|(ts, _)| *ts < first_ai_ts).count() as f64;
+    let after_count = classified.iter().filter(|(ts, _)| *ts >= first_ai_ts).count() as f64;
+    let before_rate = before_count / before_days;
+    let after_rate = after_count / after_days;
+    if before_rate <= 0.0 {
+        return None;
+    }
+    let delta_pct = ((after_rate - before_rate) / before_rate) * 100.0;
+
+    let (date_str, _) = unix_to_day_and_weekday(first_ai_ts);
+    Some(AiAcceleration {
+        first_ai_commit_date: date_str,
+        before_commits_per_day: (before_rate * 100.0).round() / 100.0,
+        after_commits_per_day: (after_rate * 100.0).round() / 100.0,
+        velocity_delta_pct: delta_pct.round() as i64,
+        before_day_count: before_days.round() as u64,
+        after_day_count: after_days.round() as u64,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AiAcceleration {
+    pub first_ai_commit_date: String,
+    pub before_commits_per_day: f64,
+    pub after_commits_per_day: f64,
+    /// Percentage change in commits/day after first AI commit, vs before.
+    /// 147 = 2.47× faster. -20 = 20% slower.
+    pub velocity_delta_pct: i64,
+    pub before_day_count: u64,
+    pub after_day_count: u64,
+}
+
+#[tauri::command]
+pub async fn get_ai_acceleration(
+    repo_path: String,
+) -> Result<Option<AiAcceleration>, String> {
+    Ok(compute_ai_acceleration(&repo_path))
 }
 
 #[tauri::command]

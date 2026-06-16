@@ -2441,3 +2441,78 @@ export async function setRepoProjectMapping(
     projectSlug,
   });
 }
+
+// ─── v1.1.78: cross-fleet rollup + AI acceleration + weekly markdown ────────
+
+export interface AiAcceleration {
+  first_ai_commit_date: string;
+  before_commits_per_day: number;
+  after_commits_per_day: number;
+  velocity_delta_pct: number;
+  before_day_count: number;
+  after_day_count: number;
+}
+
+export async function getAiAcceleration(
+  repoPath: string,
+): Promise<AiAcceleration | null> {
+  return safeInvoke<AiAcceleration | null>("get_ai_acceleration", { repoPath });
+}
+
+export interface LinkedRepo {
+  repo_path: string;
+  project_slug: string;
+}
+
+export interface FleetProjectStats {
+  project: SaasMakerProject;
+  repo_path: string | null;
+  linked: boolean;
+  w7d: WindowReport | null;
+  w30d: WindowReport | null;
+  w90d: WindowReport | null;
+  all_time: WindowReport | null;
+  acceleration: AiAcceleration | null;
+  error: string | null;
+}
+
+export interface FleetRollup {
+  projects: FleetProjectStats[];
+  unlinked_count: number;
+  linked_count: number;
+  error: string | null;
+}
+
+export interface WeeklyFleetMarkdown {
+  markdown: string;
+  project_count: number;
+  total_commits: number;
+  total_ai_commits: number;
+}
+
+export interface PushChangelogInput {
+  project_id: string;
+  title: string;
+  content: string;
+  version?: string | null;
+  type?: string | null;
+  published?: boolean | null;
+}
+
+export async function listLinkedRepos(): Promise<LinkedRepo[]> {
+  return safeInvoke<LinkedRepo[]>("list_linked_repos");
+}
+
+export async function getFleetRollup(): Promise<FleetRollup> {
+  return safeInvoke<FleetRollup>("get_fleet_rollup");
+}
+
+export async function generateWeeklyFleetMarkdown(): Promise<WeeklyFleetMarkdown> {
+  return safeInvoke<WeeklyFleetMarkdown>("generate_weekly_fleet_markdown");
+}
+
+export async function pushChangelogEntry(
+  input: PushChangelogInput,
+): Promise<unknown> {
+  return safeInvoke<unknown>("push_changelog_entry", { input });
+}
