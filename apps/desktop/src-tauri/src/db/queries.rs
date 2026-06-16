@@ -62,6 +62,7 @@ pub struct LocalReviewFindingRow {
     pub line: Option<i64>,
     pub confidence: Option<f64>,
     pub fingerprint: Option<String>,
+    pub discovery_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +226,8 @@ pub struct LocalReviewFindingInput {
     pub line: Option<i64>,
     pub confidence: Option<f64>,
     pub fingerprint: Option<String>,
+    /// "inspection" (LLM review pass, default) or "execution" (T-Rex sandbox).
+    pub discovery_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -981,8 +984,8 @@ pub fn insert_review_finding(
     conn.execute(
         "INSERT INTO local_review_findings (
             id, review_id, severity, title, summary, suggestion,
-            file_path, line, confidence, fingerprint
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            file_path, line, confidence, fingerprint, discovery_method
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
             id,
             input.review_id,
@@ -994,9 +997,30 @@ pub fn insert_review_finding(
             input.line,
             input.confidence,
             input.fingerprint,
+            input.discovery_method.as_deref().unwrap_or("inspection"),
         ],
     )?;
     Ok(id)
+}
+
+/// Persist T-Rex sandbox verdict on a review so the UI can read it back
+/// without re-running the sandbox.
+pub fn update_sandbox_verdict(
+    conn: &Connection,
+    review_id: &str,
+    verdict: &str,
+    confidence: f64,
+    summary: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE local_reviews
+         SET sandbox_verdict = ?2,
+             sandbox_confidence = ?3,
+             sandbox_summary = ?4
+         WHERE id = ?1",
+        params![review_id, verdict, confidence, summary],
+    )?;
+    Ok(())
 }
 
 pub fn insert_review_procedure_event(
@@ -1281,7 +1305,7 @@ pub fn get_local_review_with_findings(
 
     let mut stmt = conn.prepare(
         "SELECT id, review_id, severity, title, summary, suggestion,
-                file_path, line, confidence, fingerprint
+                file_path, line, confidence, fingerprint, discovery_method
          FROM local_review_findings
          WHERE review_id = ?1
          ORDER BY severity DESC, line ASC",
@@ -1299,6 +1323,7 @@ pub fn get_local_review_with_findings(
                 line: row.get(7)?,
                 confidence: row.get(8)?,
                 fingerprint: row.get(9)?,
+                discovery_method: row.get(10)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;

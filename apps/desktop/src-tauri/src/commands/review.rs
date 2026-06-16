@@ -1005,6 +1005,7 @@ pub async fn save_review(
                 line: f.line,
                 confidence: f.confidence,
                 fingerprint: f.fingerprint.clone(),
+                discovery_method: None,
             },
         )
         .map_err(|e| e.to_string())?;
@@ -1431,6 +1432,7 @@ pub async fn run_cli_review(
                 line,
                 confidence,
                 fingerprint: None,
+                discovery_method: None,
             },
         )
         .map_err(|e| e.to_string())?;

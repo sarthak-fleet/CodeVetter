@@ -389,6 +389,8 @@ export interface CliReviewFinding {
   filePath?: string;
   line?: number;
   confidence?: number;
+  /** "inspection" (LLM review) or "execution" (T-Rex sandbox). Undefined on legacy rows; treat as "inspection". */
+  discovery_method?: "inspection" | "execution";
 }
 
 export interface EvidenceCandidate {
@@ -2178,4 +2180,87 @@ export async function listenToAgentSteps(
   handler: (step: AgentStep) => void,
 ): Promise<UnlistenFn> {
   return listen<AgentStep>("agent:step", (evt) => handler(evt.payload));
+}
+
+// ─── T-Rex sandbox (/review → Test branch) ──────────────────────────────────
+
+export interface SandboxOptions {
+  run_dev_server?: boolean;
+  drive_browser?: boolean;
+  run_tests?: boolean;
+  browser_goal?: string | null;
+  start_path?: string | null;
+  max_steps?: number | null;
+  provider?: "claude" | "codex";
+  test_cmd?: string | null;
+}
+
+export interface SandboxRunInput {
+  repo_path: string;
+  branch: string;
+  base_branch?: string | null;
+  review_id?: string | null;
+  options?: SandboxOptions;
+}
+
+export interface TestRunResult {
+  command: string;
+  exit_code: number | null;
+  stdout_tail: string;
+  stderr_tail: string;
+  duration_ms: number;
+  timed_out: boolean;
+  skipped_reason: string | null;
+}
+
+export interface ExecutionFinding {
+  severity: string;
+  title: string;
+  summary: string;
+  suggestion?: string | null;
+  file_path?: string | null;
+  line?: number | null;
+  evidence?: string | null;
+}
+
+export type SandboxVerdict = "APPROVE" | "NEEDS_REVIEW" | "BLOCK";
+
+export interface SandboxRunResult {
+  run_id: string;
+  repo_path: string;
+  branch: string;
+  worktree_path: string | null;
+  server_url: string | null;
+  agent_steps: AgentStep[];
+  test_result: TestRunResult | null;
+  verdict: SandboxVerdict;
+  confidence: number;
+  summary: string;
+  findings: ExecutionFinding[];
+  duration_ms: number;
+  error: string | null;
+}
+
+export type SandboxStep =
+  | { kind: "phase"; phase: string; detail: string | null }
+  | { kind: "agent"; step: AgentStep }
+  | { kind: "test_log"; line: string };
+
+export async function runBranchSandbox(
+  input: SandboxRunInput,
+): Promise<SandboxRunResult> {
+  return safeInvoke<SandboxRunResult>("run_branch_sandbox", { input });
+}
+
+export async function detectTestCommand(
+  repoPath: string,
+): Promise<string | null> {
+  return safeInvoke<string | null>("detect_test_command", { repoPath });
+}
+
+/** Subscribe to streaming sandbox progress events. */
+export async function listenToSandboxSteps(
+  handler: (step: SandboxStep) => void,
+): Promise<UnlistenFn> {
+  return listen<SandboxStep>("sandbox:step", (evt) => handler(evt.payload));
 }

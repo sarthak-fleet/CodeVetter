@@ -11,6 +11,7 @@ pub mod intel;
 pub mod preferences;
 pub mod procedure_events;
 pub mod review;
+pub mod sandbox;
 pub mod session_adapters;
 pub mod session_intelligence;
 pub mod sessions;

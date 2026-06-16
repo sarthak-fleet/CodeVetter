@@ -209,6 +209,9 @@ fn main() {
             commands::intel::attribute_repo_commits,
             commands::intel::get_tool_breakdown,
             commands::intel::get_pricing_table,
+            // T-Rex sandbox (/review → Test branch)
+            commands::sandbox::run_branch_sandbox,
+            commands::sandbox::detect_test_command,
             // Git
             commands::git::list_git_branches,
             commands::git::get_git_remote_info,

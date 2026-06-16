@@ -30,6 +30,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
 
 import BlastRadiusPanel from "@/components/blast-radius-panel";
+import SandboxRunner from "@/components/SandboxRunner";
 import ScoreBadge from "@/components/score-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -3572,6 +3573,23 @@ export default function QuickReview() {
                   )}
                   <div
                     className="mt-6 border-t border-[var(--cv-line)] pt-5"
+                    data-testid="trex-sandbox-panel"
+                  >
+                    <SandboxRunner
+                      repoPath={repoPath}
+                      branch={selectedBranch || ""}
+                      baseBranch={baseBranch || null}
+                      reviewId={reviewId || null}
+                      onComplete={() => {
+                        // Refresh findings so the via-execution rows attach
+                        // to the existing list; QuickReview's history list
+                        // re-fetches when reviewId changes — bumping it is
+                        // enough here.
+                      }}
+                    />
+                  </div>
+                  <div
+                    className="mt-6 border-t border-[var(--cv-line)] pt-5"
                     data-testid="synthetic-qa-panel"
                   >
                     <div className="mb-3 flex items-center gap-2">
@@ -4634,6 +4652,14 @@ export default function QuickReview() {
                         >
                           {finding.severity}
                         </Badge>
+                        {finding.discovery_method === "execution" && (
+                          <Badge
+                            variant="outline"
+                            className="shrink-0 rounded-full border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 font-mono text-[9px] uppercase text-cyan-200"
+                          >
+                            via execution
+                          </Badge>
+                        )}
                         {hasEvidence && (
                           <Badge
                             variant="outline"

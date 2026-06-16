@@ -17,6 +17,28 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         [],
     );
 
+    // T-Rex: discovery_method tags findings as 'inspection' (the default,
+    // legacy LLM review pass) vs 'execution' (the sandbox runner caught it).
+    let _ = conn.execute(
+        "ALTER TABLE local_review_findings ADD COLUMN discovery_method TEXT NOT NULL DEFAULT 'inspection'",
+        [],
+    );
+    // T-Rex verdict — the autonomous APPROVE / NEEDS_REVIEW / BLOCK signal
+    // produced after the sandbox run finishes. Stored on the review so the
+    // UI can read it back without re-running.
+    let _ = conn.execute(
+        "ALTER TABLE local_reviews ADD COLUMN sandbox_verdict TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE local_reviews ADD COLUMN sandbox_confidence REAL",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE local_reviews ADD COLUMN sandbox_summary TEXT",
+        [],
+    );
+
     Ok(())
 }
 
