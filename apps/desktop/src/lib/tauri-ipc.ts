@@ -2554,3 +2554,23 @@ export async function getDoraMetrics(
     windowDays: windowDays ?? null,
   });
 }
+
+// ─── v1.1.80: Ask CodeVetter ────────────────────────────────────────────────
+
+export interface AskInput {
+  question: string;
+  repo_path?: string | null;
+  provider?: "claude" | "codex";
+  include_fleet?: boolean;
+}
+
+export interface AskResult {
+  answer: string;
+  context_bytes: number;
+  provider: string;
+  took_ms: number;
+}
+
+export async function askCodevetter(input: AskInput): Promise<AskResult> {
+  return safeInvoke<AskResult>("ask_codevetter", { input });
+}

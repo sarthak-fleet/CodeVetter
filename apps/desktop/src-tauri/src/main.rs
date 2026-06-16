@@ -234,6 +234,8 @@ fn main() {
             commands::fleet::push_changelog_entry,
             // v1.1.79: DORA metrics
             commands::dora::get_dora_metrics,
+            // v1.1.80: Ask CodeVetter — NL Q&A over fleet+repo data
+            commands::ask::ask_codevetter,
             // Git
             commands::git::list_git_branches,
             commands::git::get_git_remote_info,

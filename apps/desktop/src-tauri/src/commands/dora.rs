@@ -66,6 +66,7 @@ struct Tag {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct Commit {
     sha: String,
     ts: i64,
