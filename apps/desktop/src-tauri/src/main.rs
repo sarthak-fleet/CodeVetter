@@ -219,6 +219,13 @@ fn main() {
             commands::saas_maker::list_saas_maker_projects,
             commands::saas_maker::update_saas_maker_task,
             commands::saas_maker::push_finding_to_saas_maker,
+            // v1.1.76: sign-in + identity + repo detect
+            commands::saas_maker::start_saas_maker_signin,
+            commands::saas_maker::poll_saas_maker_signin,
+            commands::saas_maker::sign_out_of_saas_maker,
+            commands::saas_maker::get_current_user,
+            commands::saas_maker::detect_project_for_repo,
+            commands::saas_maker::set_repo_project_mapping,
             // Git
             commands::git::list_git_branches,
             commands::git::get_git_remote_info,

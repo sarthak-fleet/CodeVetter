@@ -53,9 +53,11 @@ test.describe("Smoke tests", () => {
     const nav = page.locator("nav");
     await expect(nav).toBeVisible();
 
-    // All 3 nav links should be present (Home, Review, Settings)
+    // Nav links: Home, Review, Roadmap, Rubrics, Unpack, Intel, Memories,
+    // Settings. The signed-in avatar chip is only present when authenticated,
+    // so the unsigned-in nav has exactly 8 anchor links.
     const links = nav.locator("a");
-    await expect(links).toHaveCount(3);
+    await expect(links).toHaveCount(8);
   });
 
   test("Nav bar shows current page name", async ({ page }) => {

@@ -29,6 +29,7 @@ import {
 import {
   attributeRepoCommits,
   type AuthorRow,
+  detectProjectForRepo,
   type FileChurn,
   getPreference,
   getPricingTable,
@@ -37,6 +38,7 @@ import {
   pickDirectory,
   type PricingRow,
   type RepoAttributionReport,
+  type RepoDetectResult,
   setPreference,
   type ToolBreakdownRow,
   type WindowReport,
@@ -137,6 +139,8 @@ function prettyTool(tool: string): string {
 export default function Intel() {
   const [repoPath, setRepoPath] = useState("");
   const [range, setRange] = useState<Range>("30");
+  const [detectedFleetProject, setDetectedFleetProject] =
+    useState<RepoDetectResult | null>(null);
   const [attribution, setAttribution] = useState<RepoAttributionReport | null>(null);
   const [breakdown, setBreakdown] = useState<ToolBreakdownRow[]>([]);
   const [pricing, setPricing] = useState<PricingRow[]>([]);
@@ -187,6 +191,27 @@ export default function Intel() {
       /* ignore */
     }
   }, []);
+
+  // Fleet auto-detect: surfaces a "Linked to <Project>" line when the picked
+  // repo matches a fleet project (via git URL or saved local mapping).
+  useEffect(() => {
+    if (!repoPath || !isTauriAvailable()) {
+      setDetectedFleetProject(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await detectProjectForRepo(repoPath);
+        if (!cancelled) setDetectedFleetProject(r);
+      } catch {
+        if (!cancelled) setDetectedFleetProject(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [repoPath]);
 
   useEffect(() => {
     if (!isTauriAvailable()) return;
@@ -338,6 +363,20 @@ export default function Intel() {
                 Run
               </Button>
             </div>
+
+            {detectedFleetProject?.project && (
+              <div className="flex items-center gap-1.5 rounded-md border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 text-[10px] text-cyan-300">
+                <Sparkles size={11} className="shrink-0" />
+                Linked to{" "}
+                <span className="font-mono">
+                  {detectedFleetProject.project.name}
+                </span>
+                <span className="text-cyan-500/60">·</span>
+                <span className="text-cyan-500/60">
+                  {detectedFleetProject.source === "git_url" ? "auto" : "manual"}
+                </span>
+              </div>
+            )}
 
             {attribution ? (
               <AttributionResult report={attribution} />

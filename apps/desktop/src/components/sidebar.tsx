@@ -9,6 +9,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { getCurrentUser, isTauriAvailable, type SaasMakerUser } from "@/lib/tauri-ipc";
 
 interface NavItem {
   label: string;
@@ -111,6 +112,25 @@ export default function Sidebar() {
     hideTimer.current = setTimeout(() => setVisible(false), 2000);
   };
 
+  // Signed-in identity for the right-edge avatar chip. Refreshes when the
+  // route changes (cheap; Get-Current-User uses the local cache).
+  const [user, setUser] = useState<SaasMakerUser | null>(null);
+  useEffect(() => {
+    if (!isTauriAvailable()) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const u = await getCurrentUser();
+        if (!cancelled) setUser(u);
+      } catch {
+        if (!cancelled) setUser(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pathname]);
+
   return (
     <TooltipProvider delayDuration={200}>
       <nav
@@ -165,6 +185,44 @@ export default function Sidebar() {
         <span className="ml-1 hidden text-[11px] font-medium text-slate-500 sm:inline">
           {currentPage}
         </span>
+
+        {/* Signed-in avatar chip — appears once the user authenticates with
+            SaaS Maker. Clicks through to /settings so they can sign out. */}
+        {user && (
+          <>
+            <Separator orientation="vertical" className="mx-1 h-5 bg-[var(--cv-line)]" />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Link
+                  to="/settings"
+                  className="flex items-center gap-1 rounded-full bg-emerald-500/10 px-1.5 py-0.5 hover:bg-emerald-500/15"
+                >
+                  {user.avatar_url ? (
+                    <img
+                      src={user.avatar_url}
+                      alt=""
+                      className="h-5 w-5 rounded-full object-cover"
+                    />
+                  ) : (
+                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/20 font-mono text-[8px] text-emerald-200">
+                      {(user.name ?? user.email ?? "U")
+                        .split(/\s+/)
+                        .slice(0, 2)
+                        .map((s) => s[0]?.toUpperCase() ?? "")
+                        .join("")}
+                    </span>
+                  )}
+                  <span className="hidden text-[10px] font-medium text-emerald-200 sm:inline">
+                    {user.name ?? user.email ?? "signed in"}
+                  </span>
+                </Link>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-[10px]">
+                Signed in · click to manage
+              </TooltipContent>
+            </Tooltip>
+          </>
+        )}
       </nav>
     </TooltipProvider>
   );

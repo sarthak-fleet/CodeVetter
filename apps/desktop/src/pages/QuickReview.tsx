@@ -20,6 +20,7 @@ import {
   MonitorPlay,
   Plus,
   RefreshCw,
+  Sparkles,
   Square,
   Trash2,
   Undo2,
@@ -85,6 +86,7 @@ import type {
   PlaywrightSpecCandidate,
   PullRequest,
   RawSessionContextItem,
+  RepoDetectResult,
   RepoHistoryContext,
   ReviewProcedureEvent,
   ReviewQaRunEvidence,
@@ -94,6 +96,7 @@ import type {
 import {
   analyzeBlastRadius,
   cancelReviewVerificationCommand,
+  detectProjectForRepo,
   discardFix,
   discoverPlaywrightSpecs,
   fixFindings,
@@ -920,6 +923,9 @@ export default function QuickReview() {
   const [mode, setMode] = useState<"create" | "view">("create");
 
   const [repoPath, setRepoPath] = useState("");
+  // SaaS Maker fleet auto-detect: null = unknown, populated after `detectProjectForRepo`.
+  const [detectedFleetProject, setDetectedFleetProject] =
+    useState<RepoDetectResult | null>(null);
   const [branches, setBranches] = useState<string[]>([]);
   const [currentBranch, setCurrentBranch] = useState("");
   const [pullRequests, setPullRequests] = useState<PullRequest[]>([]);
@@ -1055,6 +1061,19 @@ export default function QuickReview() {
 
   const loadFolderData = useCallback(async (dir: string) => {
     setRepoPath(dir);
+
+    // Fire-and-forget: ask the fleet which project this repo belongs to and
+    // surface the link if we have one. Soft-failure: if not signed in or
+    // the fleet doesn't know this repo, just stays null.
+    void (async () => {
+      try {
+        const r = await detectProjectForRepo(dir);
+        setDetectedFleetProject(r);
+      } catch {
+        setDetectedFleetProject(null);
+      }
+    })();
+
     const [branchResult, prs] = await Promise.allSettled([
       listGitBranches(dir),
       listPullRequests(dir),
@@ -5366,6 +5385,24 @@ export default function QuickReview() {
             <FolderOpen size={16} />
             {repoPath ? shortenPath(repoPath) : "Select repository..."}
           </Button>
+
+          {/* Fleet auto-link indicator — surfaces when CodeVetter recognised
+              this repo as a SaaS Maker project (via git_url or local mapping). */}
+          {repoPath && detectedFleetProject?.project && (
+            <div className="flex items-center gap-1.5 border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 text-[10px] text-cyan-300">
+              <Sparkles size={11} className="shrink-0" />
+              Linked to{" "}
+              <span className="font-mono">
+                {detectedFleetProject.project.name}
+              </span>
+              <span className="text-cyan-500/60">·</span>
+              <span className="text-cyan-500/60">
+                {detectedFleetProject.source === "git_url"
+                  ? "auto"
+                  : "manual"}
+              </span>
+            </div>
+          )}
 
           {!repoPath && error && (
             <div className="border border-red-500/25 bg-red-500/10 px-3 py-2 text-xs text-red-300">

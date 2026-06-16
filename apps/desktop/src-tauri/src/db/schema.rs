@@ -59,6 +59,19 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         [],
     );
 
+    // v1.1.76: persistent repo → fleet project mapping. Auto-detection from
+    // `git remote get-url origin` is the primary path; this is the fallback
+    // for repos whose remote doesn't match a fleet project's git_url (or
+    // when the user wants to override the auto-pick).
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS repo_project_mapping (
+            repo_path    TEXT PRIMARY KEY,
+            project_slug TEXT NOT NULL,
+            set_at       TEXT NOT NULL
+        )",
+        [],
+    );
+
     Ok(())
 }
 

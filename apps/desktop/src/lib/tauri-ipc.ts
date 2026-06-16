@@ -2355,3 +2355,63 @@ export async function updateSaasMakerTask(
     patch,
   });
 }
+
+// ─── v1.1.76: sign-in + identity + repo detect ───────────────────────────────
+
+export interface SaasMakerUser {
+  id: string;
+  email?: string | null;
+  name?: string | null;
+  avatar_url?: string | null;
+}
+
+export interface SignInStart {
+  code: string;
+  approval_url: string;
+  expires_in: number;
+}
+
+export type SignInResult =
+  | { status: "approved"; user: SaasMakerUser }
+  | { status: "expired" }
+  | { status: "cancelled" };
+
+export interface RepoDetectResult {
+  project: SaasMakerProject | null;
+  /** "git_url" | "manual_mapping" | "none" */
+  source: string;
+}
+
+export async function startSaasMakerSignin(): Promise<SignInStart> {
+  return safeInvoke<SignInStart>("start_saas_maker_signin");
+}
+
+export async function pollSaasMakerSignin(
+  code: string,
+): Promise<SignInResult> {
+  return safeInvoke<SignInResult>("poll_saas_maker_signin", { code });
+}
+
+export async function signOutOfSaasMaker(): Promise<void> {
+  return safeInvoke<void>("sign_out_of_saas_maker");
+}
+
+export async function getCurrentUser(): Promise<SaasMakerUser | null> {
+  return safeInvoke<SaasMakerUser | null>("get_current_user");
+}
+
+export async function detectProjectForRepo(
+  repoPath: string,
+): Promise<RepoDetectResult> {
+  return safeInvoke<RepoDetectResult>("detect_project_for_repo", { repoPath });
+}
+
+export async function setRepoProjectMapping(
+  repoPath: string,
+  projectSlug: string,
+): Promise<void> {
+  return safeInvoke<void>("set_repo_project_mapping", {
+    repoPath,
+    projectSlug,
+  });
+}

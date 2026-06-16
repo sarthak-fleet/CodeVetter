@@ -51,6 +51,7 @@ import {
 import { trackCoreAction } from "@/lib/analytics";
 import {
   deleteRepoUnpackReport,
+  detectProjectForRepo,
   exportRepoUnpackReport,
   generateUnpackReport,
   type GenerateUnpackResult,
@@ -61,6 +62,7 @@ import {
   listRepoUnpackReports,
   openInApp,
   pickDirectory,
+  type RepoDetectResult,
   scanRepoInventory,
   setPreference,
   type UnpackDirSummary,
@@ -314,6 +316,28 @@ export default function RepoUnpacked() {
     setTimelineRepoName("");
     setTimelineRows([]);
   }, []);
+
+  // Fleet auto-detect — null = unknown, populated when the repo path changes.
+  const [detectedFleetProject, setDetectedFleetProject] =
+    useState<RepoDetectResult | null>(null);
+  useEffect(() => {
+    if (!repoPath || !isTauriAvailable()) {
+      setDetectedFleetProject(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await detectProjectForRepo(repoPath);
+        if (!cancelled) setDetectedFleetProject(r);
+      } catch {
+        if (!cancelled) setDetectedFleetProject(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [repoPath]);
 
   const persistRepoPath = useCallback(async (p: string) => {
     if (!isTauriAvailable()) return;
@@ -595,6 +619,20 @@ export default function RepoUnpacked() {
           onGenerate={handleGenerate}
           phase={phase}
         />
+
+        {detectedFleetProject?.project && (
+          <div className="mt-2 flex items-center gap-1.5 rounded-md border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 text-[10px] text-cyan-300">
+            <Sparkles size={11} className="shrink-0" />
+            Linked to{" "}
+            <span className="font-mono">
+              {detectedFleetProject.project.name}
+            </span>
+            <span className="text-cyan-500/60">·</span>
+            <span className="text-cyan-500/60">
+              {detectedFleetProject.source === "git_url" ? "auto" : "manual"}
+            </span>
+          </div>
+        )}
 
         <input
           ref={graphImportInputRef}
