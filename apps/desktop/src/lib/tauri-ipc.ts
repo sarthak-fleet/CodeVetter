@@ -2516,3 +2516,41 @@ export async function pushChangelogEntry(
 ): Promise<unknown> {
   return safeInvoke<unknown>("push_changelog_entry", { input });
 }
+
+// ─── v1.1.79: DORA metrics ──────────────────────────────────────────────────
+
+export interface ReleaseInfo {
+  tag: string;
+  created_at: string;
+  commit_sha: string;
+  commits_since_previous: number;
+  triggered_hotfix: boolean;
+  median_lead_hours: number | null;
+}
+
+export interface WeeklyDeploy {
+  week_start: string;
+  deploys: number;
+}
+
+export interface DoraMetrics {
+  repo_path: string;
+  window_days: number;
+  release_count: number;
+  deploys_per_week: number;
+  median_lead_time_hours: number | null;
+  median_mttr_hours: number | null;
+  change_failure_rate_pct: number;
+  recent_releases: ReleaseInfo[];
+  weekly_deploy_counts: WeeklyDeploy[];
+}
+
+export async function getDoraMetrics(
+  repoPath: string,
+  windowDays?: number,
+): Promise<DoraMetrics> {
+  return safeInvoke<DoraMetrics>("get_dora_metrics", {
+    repoPath,
+    windowDays: windowDays ?? null,
+  });
+}

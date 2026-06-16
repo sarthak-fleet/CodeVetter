@@ -232,6 +232,8 @@ fn main() {
             commands::fleet::get_fleet_rollup,
             commands::fleet::generate_weekly_fleet_markdown,
             commands::fleet::push_changelog_entry,
+            // v1.1.79: DORA metrics
+            commands::dora::get_dora_metrics,
             // Git
             commands::git::list_git_branches,
             commands::git::get_git_remote_info,

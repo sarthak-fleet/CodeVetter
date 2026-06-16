@@ -31,7 +31,9 @@ import {
   type AuthorRow,
   detectProjectForRepo,
   type DirectoryChurn,
+  type DoraMetrics,
   type FileChurn,
+  getDoraMetrics,
   getPreference,
   isTauriAvailable,
   pickDirectory,
@@ -104,6 +106,7 @@ export default function Intel() {
   const [detectedFleetProject, setDetectedFleetProject] =
     useState<RepoDetectResult | null>(null);
   const [attribution, setAttribution] = useState<RepoAttributionReport | null>(null);
+  const [dora, setDora] = useState<DoraMetrics | null>(null);
   const [attrLoading, setAttrLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -172,12 +175,17 @@ export default function Intel() {
     setError(null);
     setAttrLoading(true);
     try {
-      const report = await attributeRepoCommits(repoPath);
+      const [report, doraResult] = await Promise.all([
+        attributeRepoCommits(repoPath),
+        getDoraMetrics(repoPath, 90).catch(() => null),
+      ]);
       setAttribution(report);
+      setDora(doraResult);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
       setAttribution(null);
+      setDora(null);
     } finally {
       setAttrLoading(false);
     }
@@ -286,7 +294,10 @@ export default function Intel() {
             )}
 
             {attribution ? (
-              <AttributionResult report={attribution} />
+              <>
+                {dora && <DoraSection metrics={dora} />}
+                <AttributionResult report={attribution} />
+              </>
             ) : (
               <p className="text-xs text-[var(--text-secondary)]">
                 {attrLoading
@@ -859,3 +870,148 @@ function TopFilesSection({ files }: { files: FileChurn[] }) {
 // silence unused-import warnings for now-unused symbols
 void Bot;
 void User;
+
+// ─── DORA section (v1.1.79) ────────────────────────────────────────────────
+
+function fmtHours(h: number | null): string {
+  if (h == null) return "—";
+  if (h < 1) return `${(h * 60).toFixed(0)} min`;
+  if (h < 48) return `${h.toFixed(1)}h`;
+  const days = h / 24;
+  if (days < 14) return `${days.toFixed(1)}d`;
+  return `${(days / 7).toFixed(1)}w`;
+}
+
+function deployBucketColor(per_week: number): string {
+  if (per_week >= 7) return "text-emerald-300"; // Elite (≥1/day)
+  if (per_week >= 1) return "text-cyan-300"; // High (weekly)
+  if (per_week >= 0.25) return "text-amber-300"; // Medium (monthly)
+  return "text-red-300"; // Low (<monthly)
+}
+
+function deployBucketLabel(per_week: number): string {
+  if (per_week >= 7) return "Elite";
+  if (per_week >= 1) return "High";
+  if (per_week >= 0.25) return "Medium";
+  return "Low";
+}
+
+function DoraSection({ metrics }: { metrics: DoraMetrics }) {
+  const maxWeekly = Math.max(1, ...metrics.weekly_deploy_counts.map((w) => w.deploys));
+  return (
+    <div className="space-y-3">
+      <div className="cv-label">DORA & release health · last {metrics.window_days}d</div>
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Stat
+          label="Deploy frequency"
+          value={`${metrics.deploys_per_week.toFixed(2)}/wk`}
+          sub={`${metrics.release_count} releases · ${deployBucketLabel(metrics.deploys_per_week)}`}
+          color={deployBucketColor(metrics.deploys_per_week)}
+        />
+        <Stat
+          label="Lead time (p50)"
+          value={fmtHours(metrics.median_lead_time_hours)}
+          sub="commit → release"
+          color="text-[var(--text-primary)]"
+        />
+        <Stat
+          label="MTTR (p50)"
+          value={fmtHours(metrics.median_mttr_hours)}
+          sub="hotfix → next release"
+          color="text-[var(--text-primary)]"
+        />
+        <Stat
+          label="Change failure rate"
+          value={`${metrics.change_failure_rate_pct.toFixed(1)}%`}
+          sub="releases needing hotfix"
+          color={
+            metrics.change_failure_rate_pct < 15
+              ? "text-emerald-300"
+              : metrics.change_failure_rate_pct < 30
+                ? "text-amber-300"
+                : "text-red-300"
+          }
+        />
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        <div className="rounded-md border border-[var(--cv-line)] bg-[var(--bg-raised)] p-3">
+          <div className="cv-label mb-2">Deploys per week (last 12w)</div>
+          <div className="flex h-16 items-end gap-1">
+            {metrics.weekly_deploy_counts.map((w, i) => (
+              <Tooltip key={i}>
+                <TooltipTrigger asChild>
+                  <div className="flex h-full flex-1 flex-col items-center justify-end">
+                    <div
+                      className="w-full rounded-sm bg-[var(--cv-accent)]/70"
+                      style={{
+                        height: `${(w.deploys / maxWeekly) * 100}%`,
+                        minHeight: w.deploys > 0 ? "2px" : "0",
+                      }}
+                    />
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="text-[10px]">
+                  w/o {w.week_start}: {w.deploys} deploys
+                </TooltipContent>
+              </Tooltip>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-md border border-[var(--cv-line)] bg-[var(--bg-raised)] p-3">
+          <div className="cv-label mb-2">Recent releases</div>
+          {metrics.recent_releases.length === 0 ? (
+            <p className="text-[11px] text-[var(--text-secondary)]">
+              No semver-shaped tags in this window. Looks for{" "}
+              <span className="font-mono">v1.2.3</span>,{" "}
+              <span className="font-mono">1.2.3-rc.1</span>, etc.
+            </p>
+          ) : (
+            <div className="space-y-1 font-mono text-[11px]">
+              {metrics.recent_releases.slice(0, 8).map((r) => (
+                <div
+                  key={r.tag}
+                  className="flex items-center justify-between gap-2"
+                >
+                  <span className="text-[var(--cv-accent)]">{r.tag}</span>
+                  <span className="text-[var(--text-secondary)]">
+                    {r.created_at.slice(0, 10)} · {r.commits_since_previous} commits
+                  </span>
+                  {r.triggered_hotfix && (
+                    <Badge
+                      variant="outline"
+                      className="border-red-500/40 bg-red-500/10 text-[9px] text-red-200"
+                    >
+                      hotfix
+                    </Badge>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  sub,
+  color,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+  color: string;
+}) {
+  return (
+    <div className="rounded-md border border-[var(--cv-line)] bg-[var(--bg-raised)] p-3">
+      <div className="cv-label">{label}</div>
+      <div className={`mt-1 text-lg font-semibold ${color}`}>{value}</div>
+      <div className="text-[10px] text-[var(--text-secondary)]">{sub}</div>
+    </div>
+  );
+}

@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod agent;
 pub mod agent_memories;
 pub mod blast_radius;
+pub mod dora;
 pub mod evidence_pattern;
 pub mod files;
 pub mod fleet;
