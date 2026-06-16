@@ -20,9 +20,9 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager, State};
+use tauri::async_runtime::{spawn as runtime_spawn, JoinHandle};
 use tokio::process::Command;
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
 
 use crate::commands::sandbox::{run_branch_sandbox_inner, SandboxOptions, SandboxRunInput};
 use crate::DbState;
@@ -186,7 +186,7 @@ fn spawn_watcher_task(
     let base_owned = base_branch.clone();
     let interval = interval_secs.max(MIN_INTERVAL_SECS);
 
-    let task = tokio::spawn(async move {
+    let task = runtime_spawn(async move {
         let in_flight = Arc::new(Mutex::new(HashSet::<i64>::new()));
         let mut rx = rx;
         let mut ticker = tokio::time::interval(Duration::from_secs(interval));
@@ -270,7 +270,7 @@ async fn tick_once(
         let base_c = watcher.base_branch.clone();
         let in_flight_c = in_flight.clone();
 
-        tokio::spawn(async move {
+        runtime_spawn(async move {
             let token = read_github_token(&db_c);
             let remote = remote_owner_repo(&repo_path_c).await.ok();
             if let (Some(tok), Some((owner, repo))) = (token.as_deref(), remote.as_ref()) {
