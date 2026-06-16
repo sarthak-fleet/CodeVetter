@@ -14,7 +14,7 @@ test.describe("Intel page", () => {
     consoleErrors.assertNoErrors();
   });
 
-  test("/intel loads with both cards and a range picker", async ({ page }) => {
+  test("/intel renders the Repo Attribution card", async ({ page }) => {
     await navigateTo(page, "/intel");
     await waitForNoSpinners(page);
 
@@ -22,12 +22,9 @@ test.describe("Intel page", () => {
       page.locator("h1", { hasText: "Engineering Intelligence" }),
     ).toBeVisible();
     await expect(page.getByText("Repo Attribution")).toBeVisible();
-    await expect(page.getByText("Per-Tool LLM Usage")).toBeVisible();
 
-    // The four compact range buttons should all be present.
-    for (const label of ["7d", "30d", "90d", "All"]) {
-      await expect(page.getByRole("button", { name: label, exact: true })).toBeVisible();
-    }
+    // Per-Tool LLM card was removed in v1.1.77.
+    await expect(page.getByText("Per-Tool LLM Usage")).toHaveCount(0);
 
     // Run button is disabled until a path is entered.
     const runButton = page.getByRole("button", { name: "Run" });
@@ -44,12 +41,11 @@ test.describe("Intel page", () => {
     await expect(page.getByRole("button", { name: "Run" })).toBeEnabled();
   });
 
-  test("range picker reflects selection", async ({ page }) => {
+  test("tool window picker is gone", async ({ page }) => {
     await navigateTo(page, "/intel");
     await waitForNoSpinners(page);
 
-    const all = page.getByRole("button", { name: "All", exact: true });
-    await all.click();
-    await expect(all).toBeVisible();
+    // v1.1.77 removed the per-tool LLM card and its window-range picker.
+    await expect(page.getByText("Tool window")).toHaveCount(0);
   });
 });

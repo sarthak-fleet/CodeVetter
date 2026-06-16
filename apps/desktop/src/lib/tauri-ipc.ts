@@ -1014,7 +1014,7 @@ export interface DailyAttribution {
 }
 
 export interface WindowReport {
-  label: string; // "all" / "90d" / "30d" / "7d"
+  label: string; // "all" / "1y" / "90d" / "30d" / "7d"
   total_commits: number;
   ai_commits: number;
   human_commits: number;
@@ -1025,6 +1025,28 @@ export interface WindowReport {
   human_deletions: number;
   active_days: number;
   by_tool: ToolCount[];
+  revert_or_fixup_commits: number;
+  commit_size_p50: number;
+  commit_size_p95: number;
+  commit_size_max: number;
+}
+
+export interface DirectoryChurn {
+  path: string;
+  commits: number;
+  additions: number;
+  deletions: number;
+  ai_commits: number;
+  human_commits: number;
+}
+
+export interface WeeklyVelocityBucket {
+  week_start: string;
+  total_commits: number;
+  ai_commits: number;
+  human_commits: number;
+  additions: number;
+  deletions: number;
 }
 
 export interface AuthorRow {
@@ -1054,6 +1076,10 @@ export interface RepoAttributionReport {
   top_files: FileChurn[];
   day_of_week: [number, number, number, number, number, number, number];
   daily_series: DailyAttribution[];
+  /** 7 rows × 24 columns. row 0 = Monday, col 0 = 00:00 UTC. */
+  hour_of_week: number[][];
+  weekly_velocity: WeeklyVelocityBucket[];
+  top_directories: DirectoryChurn[];
 }
 
 export interface ModelCostRow {

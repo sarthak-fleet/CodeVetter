@@ -101,7 +101,7 @@ pub struct DailyAttribution {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowReport {
-    pub label: String, // "all" / "90d" / "30d" / "7d"
+    pub label: String, // "all" / "1y" / "90d" / "30d" / "7d"
     pub total_commits: u64,
     pub ai_commits: u64,
     pub human_commits: u64,
@@ -112,6 +112,14 @@ pub struct WindowReport {
     pub human_deletions: u64,
     pub active_days: u64,
     pub by_tool: Vec<ToolCount>,
+    // v1.1.77 additions:
+    /// Commits whose subject starts with `revert`, `fix:`, `fixup!`, etc.
+    /// Useful as a codebase-stability proxy. See `is_revert_or_fixup`.
+    pub revert_or_fixup_commits: u64,
+    /// p50 / p95 / max lines (additions + deletions) per commit in the window.
+    pub commit_size_p50: u64,
+    pub commit_size_p95: u64,
+    pub commit_size_max: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +145,26 @@ pub struct FileChurn {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectoryChurn {
+    pub path: String,
+    pub commits: u64,
+    pub additions: u64,
+    pub deletions: u64,
+    pub ai_commits: u64,
+    pub human_commits: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeeklyVelocityBucket {
+    pub week_start: String, // YYYY-MM-DD of the Monday
+    pub total_commits: u64,
+    pub ai_commits: u64,
+    pub human_commits: u64,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoAttributionReport {
     pub repo_path: String,
     pub windows: Vec<WindowReport>,
@@ -144,6 +172,13 @@ pub struct RepoAttributionReport {
     pub top_files: Vec<FileChurn>,
     pub day_of_week: [u64; 7], // Mon..Sun
     pub daily_series: Vec<DailyAttribution>, // last 90d, zero-filled
+    // v1.1.77 additions:
+    /// 7 rows × 24 cols. row 0 = Mon, col 0 = 00:00 (UTC). Cell = commit count.
+    pub hour_of_week: Vec<Vec<u64>>,
+    /// Last 12 ISO weeks, zero-filled. Monday-starting.
+    pub weekly_velocity: Vec<WeeklyVelocityBucket>,
+    /// Top 15 directories by churn (additions + deletions), all time.
+    pub top_directories: Vec<DirectoryChurn>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -427,6 +462,7 @@ fn summarize(repo_path: String, commits: &[ParsedCommit]) -> RepoAttributionRepo
 
     let window_specs: &[(&str, Option<i64>)] = &[
         ("all", None),
+        ("1y", Some(365)),
         ("90d", Some(90)),
         ("30d", Some(30)),
         ("7d", Some(7)),
@@ -444,6 +480,9 @@ fn summarize(repo_path: String, commits: &[ParsedCommit]) -> RepoAttributionRepo
     let top_files = file_churn(commits, 15);
     let day_of_week = dayofweek_histogram(&classified);
     let daily_series = daily_series_90d(&classified, now_ts);
+    let hour_of_week = hour_of_week_histogram(commits);
+    let weekly_velocity = weekly_velocity_12w(&classified, now_ts);
+    let top_directories = directory_churn(commits, &classified, 15);
 
     RepoAttributionReport {
         repo_path,
@@ -452,6 +491,9 @@ fn summarize(repo_path: String, commits: &[ParsedCommit]) -> RepoAttributionRepo
         top_files,
         day_of_week,
         daily_series,
+        hour_of_week,
+        weekly_velocity,
+        top_directories,
     }
 }
 
@@ -470,6 +512,8 @@ fn window_for<'a>(
     let mut human_del = 0u64;
     let mut by_tool: HashMap<&'static str, ToolCount> = HashMap::new();
     let mut day_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut revert_or_fixup = 0u64;
+    let mut sizes: Vec<u64> = Vec::new();
 
     for c in classified {
         if let Some(cut) = cutoff_ts {
@@ -500,10 +544,16 @@ fn window_for<'a>(
             human_add += c.commit.additions;
             human_del += c.commit.deletions;
         }
+
+        if is_revert_or_fixup(&c.commit.body) {
+            revert_or_fixup += 1;
+        }
+        sizes.push(c.commit.additions + c.commit.deletions);
     }
 
     let mut tool_counts: Vec<ToolCount> = by_tool.into_values().collect();
     tool_counts.sort_by(|a, b| b.commits.cmp(&a.commits));
+    let (p50, p95, max_sz) = size_percentiles(&mut sizes);
 
     WindowReport {
         label: label.to_string(),
@@ -517,7 +567,52 @@ fn window_for<'a>(
         human_deletions: human_del,
         active_days: day_set.len() as u64,
         by_tool: tool_counts,
+        revert_or_fixup_commits: revert_or_fixup,
+        commit_size_p50: p50,
+        commit_size_p95: p95,
+        commit_size_max: max_sz,
     }
+}
+
+/// True for "revert: …", "Revert "…"", "fix: …", "fixup! …", "fix(…)…",
+/// "fix!:" and the GitHub auto-squash markers. The first non-empty line of
+/// the commit body is the subject — we only inspect that, because long
+/// bodies often quote unrelated reverts in their description.
+pub(crate) fn is_revert_or_fixup(body: &str) -> bool {
+    let subject = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let lower = subject.trim_start().to_ascii_lowercase();
+    if lower.starts_with("revert ") || lower.starts_with("revert: ") || lower.starts_with("revert\"") {
+        return true;
+    }
+    if lower.starts_with("fixup!") || lower.starts_with("squash!") || lower.starts_with("amend!") {
+        return true;
+    }
+    // Conventional-commit `fix:` / `fix(scope):` / `fix!:`. Must be at start,
+    // followed by an optional `(...)`, optional `!`, then `:`.
+    let bytes = lower.as_bytes();
+    if bytes.len() >= 4 && &bytes[..3] == b"fix" {
+        let mut i = 3;
+        if i < bytes.len() && bytes[i] == b'(' {
+            // skip to matching `)`
+            while i < bytes.len() && bytes[i] != b')' { i += 1; }
+            if i < bytes.len() { i += 1; }
+        }
+        if i < bytes.len() && bytes[i] == b'!' { i += 1; }
+        if i < bytes.len() && bytes[i] == b':' { return true; }
+    }
+    false
+}
+
+pub(crate) fn size_percentiles(values: &mut [u64]) -> (u64, u64, u64) {
+    if values.is_empty() {
+        return (0, 0, 0);
+    }
+    values.sort_unstable();
+    let pick = |q: f64| -> u64 {
+        let idx = ((values.len() as f64 - 1.0) * q).round() as usize;
+        values[idx.min(values.len() - 1)]
+    };
+    (pick(0.5), pick(0.95), *values.last().unwrap())
 }
 
 // Helper alias because closures and lifetimes get verbose.
@@ -696,6 +791,159 @@ fn max_ts(commits: &[ParsedCommit]) -> i64 {
         // Empty repo: fall back to now so the empty windows return cleanly.
         chrono::Utc::now().timestamp()
     })
+}
+
+// ─── v1.1.77 helpers ────────────────────────────────────────────────────────
+
+/// 7×24 histogram of commits by (weekday, hour-of-day). Row 0 = Monday,
+/// col 0 = 00:00 UTC. All-time, anchored on the commit timestamp's UTC hour.
+fn hour_of_week_histogram(commits: &[ParsedCommit]) -> Vec<Vec<u64>> {
+    use chrono::{Datelike, TimeZone, Timelike, Utc};
+    let mut grid: Vec<Vec<u64>> = vec![vec![0u64; 24]; 7];
+    for c in commits {
+        if let Some(dt) = Utc.timestamp_opt(c.timestamp, 0).single() {
+            let wd = dt.weekday().num_days_from_monday() as usize;
+            let h = dt.hour() as usize;
+            if wd < 7 && h < 24 {
+                grid[wd][h] += 1;
+            }
+        }
+    }
+    grid
+}
+
+/// Last 12 ISO weeks (Monday-starting) zero-filled. Each bucket has total /
+/// AI / human commit counts plus aggregate additions/deletions.
+fn weekly_velocity_12w<'a>(
+    classified: &[ClassifiedRef<'a>],
+    now_ts: i64,
+) -> Vec<WeeklyVelocityBucket> {
+    use chrono::{Datelike, Duration, NaiveDate, TimeZone, Utc};
+
+    let now_day = match Utc.timestamp_opt(now_ts, 0).single() {
+        Some(dt) => dt.date_naive(),
+        None => return Vec::new(),
+    };
+
+    // Anchor on the Monday of the week that contains the newest commit so
+    // labels read naturally.
+    let dow = now_day.weekday().num_days_from_monday() as i64;
+    let current_monday = now_day - Duration::days(dow);
+    let earliest_monday = current_monday - Duration::weeks(11);
+
+    // Bucket the classified commits into weeks.
+    let mut by_week: BTreeMap<NaiveDate, (u64, u64, u64, u64, u64)> = BTreeMap::new();
+    for c in classified {
+        let Some(dt) = Utc.timestamp_opt(c.commit.timestamp, 0).single() else { continue; };
+        let d = dt.date_naive();
+        if d < earliest_monday {
+            continue;
+        }
+        let dow_c = d.weekday().num_days_from_monday() as i64;
+        let monday = d - Duration::days(dow_c);
+        let entry = by_week.entry(monday).or_insert((0, 0, 0, 0, 0));
+        entry.0 += 1; // total
+        if c.tool == TOOL_AUTOMATION {
+            // Skip in AI/human split but still count in total.
+        } else if c.is_ai {
+            entry.1 += 1;
+        } else {
+            entry.2 += 1;
+        }
+        entry.3 += c.commit.additions;
+        entry.4 += c.commit.deletions;
+    }
+
+    let mut out: Vec<WeeklyVelocityBucket> = Vec::with_capacity(12);
+    for i in 0..12 {
+        let monday = earliest_monday + Duration::weeks(i);
+        let key = monday;
+        let (total, ai, human, add, del) =
+            by_week.get(&key).copied().unwrap_or((0, 0, 0, 0, 0));
+        out.push(WeeklyVelocityBucket {
+            week_start: monday.format("%Y-%m-%d").to_string(),
+            total_commits: total,
+            ai_commits: ai,
+            human_commits: human,
+            additions: add,
+            deletions: del,
+        });
+    }
+    out
+}
+
+/// Top-N directories by total churn (additions + deletions) all-time. The
+/// directory is the first path segment of each touched file. Files at the
+/// repo root group under "(root)" so they're still surfaced.
+fn directory_churn<'a>(
+    commits: &[ParsedCommit],
+    classified: &[ClassifiedRef<'a>],
+    top_n: usize,
+) -> Vec<DirectoryChurn> {
+    // Build per-commit AI flag lookup keyed by sha so the two parallel
+    // datasets line up cleanly.
+    let mut sha_to_ai: HashMap<&str, bool> = HashMap::with_capacity(classified.len());
+    let mut sha_to_auto: HashMap<&str, bool> = HashMap::with_capacity(classified.len());
+    for c in classified {
+        sha_to_ai.insert(c.commit.sha.as_str(), c.is_ai);
+        sha_to_auto.insert(c.commit.sha.as_str(), c.tool == TOOL_AUTOMATION);
+    }
+
+    let mut by_dir: HashMap<String, DirectoryChurn> = HashMap::new();
+    // Each commit's contribution counts ONCE per directory it touched, not
+    // once per file in that directory — otherwise a 500-file commit on
+    // src/ would inflate the commit count by 500.
+    for c in commits {
+        let is_ai = sha_to_ai.get(c.sha.as_str()).copied().unwrap_or(false);
+        let is_auto = sha_to_auto.get(c.sha.as_str()).copied().unwrap_or(false);
+        let mut dirs_in_this_commit: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for f in &c.files {
+            let dir = top_directory(&f.path).to_string();
+            let entry = by_dir
+                .entry(dir.clone())
+                .or_insert_with(|| DirectoryChurn {
+                    path: dir.clone(),
+                    commits: 0,
+                    additions: 0,
+                    deletions: 0,
+                    ai_commits: 0,
+                    human_commits: 0,
+                });
+            entry.additions += f.additions;
+            entry.deletions += f.deletions;
+            if dirs_in_this_commit.insert(dir) {
+                entry.commits += 1;
+                if is_auto {
+                    // skip AI/human split
+                } else if is_ai {
+                    entry.ai_commits += 1;
+                } else {
+                    entry.human_commits += 1;
+                }
+            }
+        }
+    }
+    let mut rows: Vec<DirectoryChurn> = by_dir.into_values().collect();
+    rows.sort_by(|a, b| {
+        (b.additions + b.deletions)
+            .cmp(&(a.additions + a.deletions))
+            .then(b.commits.cmp(&a.commits))
+    });
+    rows.truncate(top_n);
+    rows
+}
+
+pub(crate) fn top_directory(path: &str) -> &str {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return "(root)";
+    }
+    match trimmed.find('/') {
+        Some(0) => "(root)", // path starts with `/`; treat as root
+        Some(idx) => &trimmed[..idx],
+        None => "(root)",
+    }
 }
 
 // ─── Tool breakdown query ───────────────────────────────────────────────────
@@ -1070,7 +1318,7 @@ mod tests {
         let commits = parse_git_log(&raw);
         let report = summarize("/tmp/r".into(), &commits);
 
-        assert_eq!(report.windows.len(), 4);
+        assert_eq!(report.windows.len(), 5); // All / 1Y / 90D / 30D / 7D
         let all = &report.windows[0];
         assert_eq!(all.label, "all");
         assert_eq!(all.total_commits, 3);
@@ -1146,6 +1394,215 @@ Co-Authored-By: Claude <noreply@anthropic.com>
         assert_eq!(canonicalize_model("haiku-4-5"), "haiku");
         assert_eq!(canonicalize_model("gpt-4o-2024-08-06"), "gpt-4o");
         assert_eq!(canonicalize_model(""), "unknown");
+    }
+
+    // ─── v1.1.77 helpers ───────────────────────────────────────────────────
+
+    #[test]
+    fn revert_fixup_subject_detection() {
+        // Reverts in their various stamps.
+        assert!(is_revert_or_fixup("Revert \"feat: thing\"\n"));
+        assert!(is_revert_or_fixup("revert: bad change\n"));
+        assert!(is_revert_or_fixup("Revert previous commit\n"));
+        // Fixup / autosquash markers.
+        assert!(is_revert_or_fixup("fixup! original subject\n"));
+        assert!(is_revert_or_fixup("squash! original subject\n"));
+        assert!(is_revert_or_fixup("amend! original subject\n"));
+        // Conventional fix.
+        assert!(is_revert_or_fixup("fix: off-by-one\n"));
+        assert!(is_revert_or_fixup("fix(parser): missing brace\n"));
+        assert!(is_revert_or_fixup("fix!: breaking fix\n"));
+        // Negatives — fixture-like names that contain "fix" or "revert" mid-string.
+        assert!(!is_revert_or_fixup("feat: postfix engine\n"));
+        assert!(!is_revert_or_fixup("docs: irreversible decisions\n"));
+        assert!(!is_revert_or_fixup("chore: clean up\n"));
+        assert!(!is_revert_or_fixup(""));
+    }
+
+    #[test]
+    fn size_percentiles_basic() {
+        let mut v: Vec<u64> = (1..=10).collect(); // 1..10
+        let (p50, p95, m) = size_percentiles(&mut v);
+        assert!((5..=6).contains(&p50));
+        assert!(p95 >= 9);
+        assert_eq!(m, 10);
+    }
+
+    #[test]
+    fn size_percentiles_empty() {
+        let mut v: Vec<u64> = vec![];
+        assert_eq!(size_percentiles(&mut v), (0, 0, 0));
+    }
+
+    #[test]
+    fn top_directory_splits() {
+        assert_eq!(top_directory("src/lib.rs"), "src");
+        assert_eq!(top_directory("apps/desktop/src/foo.tsx"), "apps");
+        assert_eq!(top_directory("README.md"), "(root)");
+        assert_eq!(top_directory(""), "(root)");
+        assert_eq!(top_directory("/abs/path.txt"), "(root)");
+    }
+
+    #[test]
+    fn hour_of_week_histogram_counts_commits() {
+        // Two commits on the same Monday at 09:00 and one on Tuesday 14:00 UTC.
+        // 2026-01-05 was a Monday.
+        let monday_9am = chrono::NaiveDate::from_ymd_opt(2026, 1, 5)
+            .unwrap()
+            .and_hms_opt(9, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let tuesday_2pm = chrono::NaiveDate::from_ymd_opt(2026, 1, 6)
+            .unwrap()
+            .and_hms_opt(14, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        let commits = vec![
+            ParsedCommit {
+                sha: "a".into(),
+                author_name: "x".into(),
+                author_email: "x".into(),
+                timestamp: monday_9am,
+                body: "x".into(),
+                additions: 1,
+                deletions: 0,
+                files: vec![],
+            },
+            ParsedCommit {
+                sha: "b".into(),
+                author_name: "x".into(),
+                author_email: "x".into(),
+                timestamp: monday_9am,
+                body: "x".into(),
+                additions: 1,
+                deletions: 0,
+                files: vec![],
+            },
+            ParsedCommit {
+                sha: "c".into(),
+                author_name: "x".into(),
+                author_email: "x".into(),
+                timestamp: tuesday_2pm,
+                body: "x".into(),
+                additions: 1,
+                deletions: 0,
+                files: vec![],
+            },
+        ];
+        let grid = hour_of_week_histogram(&commits);
+        assert_eq!(grid.len(), 7);
+        assert_eq!(grid[0].len(), 24);
+        assert_eq!(grid[0][9], 2); // Mon 09:00
+        assert_eq!(grid[1][14], 1); // Tue 14:00
+        // Everything else stays zero.
+        let total: u64 = grid.iter().flat_map(|row| row.iter()).sum();
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn weekly_velocity_12w_returns_12_zero_filled() {
+        // Empty classified list → 12 buckets of zeros.
+        let now = chrono::Utc::now().timestamp();
+        let v = weekly_velocity_12w(&[], now);
+        assert_eq!(v.len(), 12);
+        assert!(v.iter().all(|b| b.total_commits == 0));
+    }
+
+    #[test]
+    fn directory_churn_aggregates_per_top_dir() {
+        let raw = [
+            mk_record(
+                "s1",
+                "Alice",
+                "alice@x",
+                chrono::Utc::now().timestamp() - 86_400,
+                "feat\n",
+                &[(20, 5, "src/lib.rs"), (10, 0, "src/main.rs")],
+            ),
+            mk_record(
+                "s2",
+                "Bob",
+                "bob@x",
+                chrono::Utc::now().timestamp() - 86_400,
+                "feat\n",
+                &[(5, 1, "apps/desktop/src/foo.tsx")],
+            ),
+            mk_record(
+                "s3",
+                "Alice",
+                "alice@x",
+                chrono::Utc::now().timestamp() - 86_400,
+                "docs\n",
+                &[(2, 0, "README.md")],
+            ),
+        ]
+        .concat();
+        let commits = parse_git_log(&raw);
+        let classified: Vec<Classified> = commits
+            .iter()
+            .map(|c| {
+                let (tool, is_ai) = classify_commit(c);
+                let (day, weekday) = unix_to_day_and_weekday(c.timestamp);
+                Classified {
+                    commit: c,
+                    tool,
+                    is_ai,
+                    day,
+                    weekday,
+                }
+            })
+            .collect();
+        let dirs = directory_churn(&commits, &classified, 10);
+        // src should top because it has 30 lines churn (20+10) > apps (6) > (root) (2)
+        let src = dirs.iter().find(|d| d.path == "src").expect("src dir");
+        assert_eq!(src.commits, 1, "two src/* files in one commit count as one");
+        assert_eq!(src.additions, 30);
+        assert_eq!(src.deletions, 5);
+
+        let apps = dirs.iter().find(|d| d.path == "apps").expect("apps dir");
+        assert_eq!(apps.commits, 1);
+        assert_eq!(apps.additions, 5);
+
+        let root = dirs.iter().find(|d| d.path == "(root)").expect("root dir");
+        assert_eq!(root.commits, 1);
+        assert_eq!(root.additions, 2);
+
+        // Ordered by churn desc.
+        assert_eq!(dirs[0].path, "src");
+    }
+
+    #[test]
+    fn windows_include_size_and_revert_stats() {
+        let ts = chrono::Utc::now().timestamp() - 86_400;
+        let raw = [
+            mk_record(
+                "h1",
+                "Alice",
+                "a@x",
+                ts,
+                "feat: thing\n",
+                &[(50, 10, "f1")],
+            ),
+            mk_record(
+                "h2",
+                "Alice",
+                "a@x",
+                ts,
+                "fix: regression\n",
+                &[(2, 2, "f1")],
+            ),
+            mk_record("h3", "Alice", "a@x", ts, "Revert \"feat\"\n", &[(0, 60, "f1")]),
+        ]
+        .concat();
+        let commits = parse_git_log(&raw);
+        let report = summarize("/tmp/r".into(), &commits);
+        let all = &report.windows[0];
+        assert_eq!(all.revert_or_fixup_commits, 2); // "fix:" + "Revert"
+        // p50 with 3 sample sizes {60, 4, 60} sorted = {4, 60, 60} → p50 = 60.
+        assert_eq!(all.commit_size_p50, 60);
+        assert_eq!(all.commit_size_max, 60);
     }
 
     /// Real-git integration smoke test, gated `#[ignore]`.

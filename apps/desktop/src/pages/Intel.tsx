@@ -3,9 +3,9 @@ import {
   Bot,
   FolderOpen,
   GitCommit,
-  HelpCircle,
   Loader2,
   Sparkles,
+  User,
   Users,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -30,37 +30,21 @@ import {
   attributeRepoCommits,
   type AuthorRow,
   detectProjectForRepo,
+  type DirectoryChurn,
   type FileChurn,
   getPreference,
-  getPricingTable,
-  getToolBreakdown,
   isTauriAvailable,
   pickDirectory,
-  type PricingRow,
   type RepoAttributionReport,
   type RepoDetectResult,
   setPreference,
-  type ToolBreakdownRow,
+  type WeeklyVelocityBucket,
   type WindowReport,
 } from "@/lib/tauri-ipc";
 
 const REPO_PATH_KEY = "intel_last_repo";
-const WINDOW_KEY = "intel_last_window";
-
-type Range = "7" | "30" | "90" | "all";
-
-const RANGE_OPTIONS: Array<{ value: Range; label: string; days: number | null }> = [
-  { value: "7", label: "7d", days: 7 },
-  { value: "30", label: "30d", days: 30 },
-  { value: "90", label: "90d", days: 90 },
-  { value: "all", label: "All", days: null },
-];
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-
-function rangeToDays(w: Range): number | null {
-  return w === "all" ? null : Number.parseInt(w, 10);
-}
 
 function fmtNum(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -68,30 +52,9 @@ function fmtNum(n: number): string {
   return n.toLocaleString();
 }
 
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
-  return String(n);
-}
-
 function fmtPct(part: number, whole: number): string {
   if (whole <= 0) return "—";
   return `${((part / whole) * 100).toFixed(1)}%`;
-}
-
-function fmtSeconds(s: number | null): string {
-  if (s == null) return "—";
-  if (s < 60) return `${s.toFixed(0)}s`;
-  if (s < 3600) return `${(s / 60).toFixed(1)}m`;
-  return `${(s / 3600).toFixed(1)}h`;
-}
-
-function fmtUsd(n: number): string {
-  if (n >= 1000) return `$${(n / 1000).toFixed(1)}k`;
-  if (n >= 100) return `$${n.toFixed(0)}`;
-  if (n >= 10) return `$${n.toFixed(1)}`;
-  return `$${n.toFixed(2)}`;
 }
 
 const TOOL_COLORS: Record<string, string> = {
@@ -138,14 +101,10 @@ function prettyTool(tool: string): string {
 
 export default function Intel() {
   const [repoPath, setRepoPath] = useState("");
-  const [range, setRange] = useState<Range>("30");
   const [detectedFleetProject, setDetectedFleetProject] =
     useState<RepoDetectResult | null>(null);
   const [attribution, setAttribution] = useState<RepoAttributionReport | null>(null);
-  const [breakdown, setBreakdown] = useState<ToolBreakdownRow[]>([]);
-  const [pricing, setPricing] = useState<PricingRow[]>([]);
   const [attrLoading, setAttrLoading] = useState(false);
-  const [breakdownLoading, setBreakdownLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -154,20 +113,6 @@ export default function Intel() {
       try {
         const last = await getPreference(REPO_PATH_KEY);
         if (last) setRepoPath(last);
-        const w = (await getPreference(WINDOW_KEY)) as Range | null;
-        if (w && RANGE_OPTIONS.some((o) => o.value === w)) setRange(w);
-      } catch {
-        /* ignore */
-      }
-    })();
-  }, []);
-
-  useEffect(() => {
-    if (!isTauriAvailable()) return;
-    void (async () => {
-      try {
-        const rows = await getPricingTable();
-        setPricing(rows);
       } catch {
         /* ignore */
       }
@@ -183,17 +128,7 @@ export default function Intel() {
     }
   }, []);
 
-  const persistRange = useCallback(async (w: Range) => {
-    if (!isTauriAvailable()) return;
-    try {
-      await setPreference(WINDOW_KEY, w);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  // Fleet auto-detect: surfaces a "Linked to <Project>" line when the picked
-  // repo matches a fleet project (via git URL or saved local mapping).
+  // Fleet auto-detect.
   useEffect(() => {
     if (!repoPath || !isTauriAvailable()) {
       setDetectedFleetProject(null);
@@ -212,25 +147,6 @@ export default function Intel() {
       cancelled = true;
     };
   }, [repoPath]);
-
-  useEffect(() => {
-    if (!isTauriAvailable()) return;
-    let cancelled = false;
-    void (async () => {
-      if (!cancelled) setBreakdownLoading(true);
-      try {
-        const rows = await getToolBreakdown(rangeToDays(range));
-        if (!cancelled) setBreakdown(rows);
-      } catch {
-        if (!cancelled) setBreakdown([]);
-      } finally {
-        if (!cancelled) setBreakdownLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [range]);
 
   const handlePick = useCallback(async () => {
     if (!isTauriAvailable()) {
@@ -286,33 +202,11 @@ export default function Intel() {
             </div>
             <p className="mt-1 max-w-2xl text-sm text-[var(--text-secondary)]">
               How much of your recent code was AI-led vs. human-led, who shipped
-              what, and where your LLM spend actually goes. Computed locally
-              from your existing git history and indexed agent sessions.
+              what, and where the work actually concentrates. Computed locally
+              from your existing git history.
             </p>
           </div>
-          <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-            <span>Tool window:</span>
-            <RangePicker
-              value={range}
-              onChange={(w) => {
-                setRange(w);
-                void persistRange(w);
-              }}
-            />
-          </div>
         </header>
-
-        {error && (
-          <div className="mb-4 flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
-            <div>
-              <div className="font-medium">Couldn&apos;t finish that.</div>
-              <div className="mt-0.5 font-mono text-xs text-red-300/80">
-                {error}
-              </div>
-            </div>
-          </div>
-        )}
 
         <Card className="mb-4 border-[var(--cv-line)] bg-[var(--bg-surface)]">
           <CardHeader className="pb-3">
@@ -323,7 +217,8 @@ export default function Intel() {
             <CardDescription className="text-xs">
               Single <span className="font-mono">git log</span> pass; classifies
               commits via Co-Authored-By trailers and known AI tool markers;
-              splits into <span className="font-mono">All / 90d / 30d / 7d</span>{" "}
+              splits into{" "}
+              <span className="font-mono">All / 1Y / 90D / 30D / 7D</span>{" "}
               windows so the trend is visible at a glance.
             </CardDescription>
           </CardHeader>
@@ -378,6 +273,18 @@ export default function Intel() {
               </div>
             )}
 
+            {error && (
+              <div className="flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+                <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+                <div>
+                  <div className="font-medium">Couldn&apos;t finish that.</div>
+                  <div className="mt-0.5 font-mono text-xs text-red-300/80">
+                    {error}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {attribution ? (
               <AttributionResult report={attribution} />
             ) : (
@@ -389,65 +296,8 @@ export default function Intel() {
             )}
           </CardContent>
         </Card>
-
-        <Card className="border-[var(--cv-line)] bg-[var(--bg-surface)]">
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Bot size={16} className="text-[var(--cv-accent)]" />
-              Per-Tool LLM Usage
-              <PricingTooltip pricing={pricing} />
-            </CardTitle>
-            <CardDescription className="text-xs">
-              Rollup of every locally indexed Claude / Codex / Cursor session
-              from <span className="font-mono">cc_sessions</span>, grouped by
-              tool, with model split, cache creation tokens, and cost
-              percentiles.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {breakdownLoading ? (
-              <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-                <Loader2 size={14} className="animate-spin" /> Loading…
-              </div>
-            ) : breakdown.length === 0 ? (
-              <p className="text-xs text-[var(--text-secondary)]">
-                No indexed sessions in this window. Trigger an index from the
-                Home tab if you expected data here.
-              </p>
-            ) : (
-              <ToolBreakdownGrid rows={breakdown} />
-            )}
-          </CardContent>
-        </Card>
       </div>
     </TooltipProvider>
-  );
-}
-
-function RangePicker({
-  value,
-  onChange,
-}: {
-  value: Range;
-  onChange: (w: Range) => void;
-}) {
-  return (
-    <div className="flex items-center gap-1 rounded-md border border-[var(--cv-line)] bg-[var(--bg-raised)] p-1 text-xs">
-      {RANGE_OPTIONS.map((opt) => (
-        <button
-          key={opt.value}
-          type="button"
-          onClick={() => onChange(opt.value)}
-          className={
-            value === opt.value
-              ? "rounded bg-cyan-500/10 px-2.5 py-1 font-medium text-[var(--cv-accent)]"
-              : "rounded px-2.5 py-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-          }
-        >
-          {opt.label}
-        </button>
-      ))}
-    </div>
   );
 }
 
@@ -460,9 +310,15 @@ function AttributionResult({ report }: { report: RepoAttributionReport }) {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <DailySparkline series={report.daily_series} />
-        <DayOfWeekChart histogram={report.day_of_week} />
+        <WeeklyVelocityChart buckets={report.weekly_velocity} />
       </div>
 
+      <div className="grid gap-4 lg:grid-cols-2">
+        <DayOfWeekChart histogram={report.day_of_week} />
+        <HourOfWeekHeatmap grid={report.hour_of_week} />
+      </div>
+
+      <TopDirectoriesSection dirs={report.top_directories} />
       <AuthorsSection authors={report.by_author} />
       <TopFilesSection files={report.top_files} />
     </div>
@@ -470,8 +326,8 @@ function AttributionResult({ report }: { report: RepoAttributionReport }) {
 }
 
 function WindowsTable({ windows }: { windows: WindowReport[] }) {
-  // Order: all, 90d, 30d, 7d
-  const ordered = ["all", "90d", "30d", "7d"]
+  // Order: all, 1y, 90d, 30d, 7d
+  const ordered = ["all", "1y", "90d", "30d", "7d"]
     .map((label) => windows.find((w) => w.label === label))
     .filter((w): w is WindowReport => Boolean(w));
 
@@ -499,6 +355,20 @@ function WindowsTable({ windows }: { windows: WindowReport[] }) {
         `+${fmtNum(w.human_additions)} / −${fmtNum(w.human_deletions)}`,
     },
     { label: "active days", value: (w) => String(w.active_days) },
+    {
+      label: "commit size p50/p95",
+      value: (w) =>
+        `${fmtNum(w.commit_size_p50)} / ${fmtNum(w.commit_size_p95)}`,
+    },
+    {
+      label: "largest commit",
+      value: (w) => fmtNum(w.commit_size_max),
+    },
+    {
+      label: "revert / fixup",
+      value: (w) =>
+        `${w.revert_or_fixup_commits} · ${fmtPct(w.revert_or_fixup_commits, w.total_commits)}`,
+    },
     { label: "bots", value: (w) => String(w.automation_commits) },
   ];
 
@@ -612,7 +482,7 @@ function DailySparkline({ series }: { series: RepoAttributionReport["daily_serie
   return (
     <div className="rounded-md border border-[var(--cv-line)] bg-[var(--bg-raised)] p-3">
       <div className="cv-label mb-2">AI vs human — last 90 days</div>
-      <div className="flex h-16 items-end gap-[2px]">
+      <div className="flex h-20 items-end gap-[2px]">
         {buckets.map((b, i) => {
           const total = b.ai + b.human;
           const heightPct = (total / max) * 100;
@@ -622,19 +492,19 @@ function DailySparkline({ series }: { series: RepoAttributionReport["daily_serie
             <Tooltip key={i}>
               <TooltipTrigger asChild>
                 <div
-                  className="flex flex-1 flex-col justify-end overflow-hidden rounded-sm bg-[var(--bg-surface)]"
+                  className="flex h-full flex-1 flex-col justify-end overflow-hidden rounded-sm bg-[var(--bg-surface)]"
                   style={{ minWidth: "4px" }}
                 >
                   {humanPct > 0 && (
                     <div
                       className="bg-slate-500/60"
-                      style={{ height: `${humanPct}%` }}
+                      style={{ height: `${humanPct}%`, minHeight: "1px" }}
                     />
                   )}
                   {aiPct > 0 && (
                     <div
                       className="bg-[var(--cv-accent)]"
-                      style={{ height: `${aiPct}%` }}
+                      style={{ height: `${aiPct}%`, minHeight: "1px" }}
                     />
                   )}
                 </div>
@@ -650,16 +520,77 @@ function DailySparkline({ series }: { series: RepoAttributionReport["daily_serie
   );
 }
 
+function WeeklyVelocityChart({
+  buckets,
+}: {
+  buckets: WeeklyVelocityBucket[];
+}) {
+  const max = Math.max(1, ...buckets.map((b) => b.total_commits));
+  return (
+    <div className="rounded-md border border-[var(--cv-line)] bg-[var(--bg-raised)] p-3">
+      <div className="cv-label mb-2">Weekly velocity — last 12 weeks</div>
+      <div className="flex h-20 items-end gap-1">
+        {buckets.map((b, i) => {
+          const heightPct = (b.total_commits / max) * 100;
+          const aiPct =
+            b.total_commits === 0 ? 0 : (b.ai_commits / b.total_commits) * heightPct;
+          const humanPct =
+            b.total_commits === 0
+              ? 0
+              : (b.human_commits / b.total_commits) * heightPct;
+          const autoPct = heightPct - aiPct - humanPct;
+          return (
+            <Tooltip key={i}>
+              <TooltipTrigger asChild>
+                <div
+                  className="flex h-full flex-1 flex-col justify-end overflow-hidden rounded-sm bg-[var(--bg-surface)]"
+                  style={{ minWidth: "6px" }}
+                >
+                  {autoPct > 0 && (
+                    <div
+                      className="bg-slate-700/60"
+                      style={{ height: `${autoPct}%` }}
+                    />
+                  )}
+                  {humanPct > 0 && (
+                    <div
+                      className="bg-slate-500/60"
+                      style={{ height: `${humanPct}%`, minHeight: "1px" }}
+                    />
+                  )}
+                  {aiPct > 0 && (
+                    <div
+                      className="bg-[var(--cv-accent)]"
+                      style={{ height: `${aiPct}%`, minHeight: "1px" }}
+                    />
+                  )}
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="text-[10px]">
+                w/o {b.week_start}: {b.total_commits} commits · AI {b.ai_commits} / human {b.human_commits} · +{fmtNum(b.additions)} / −{fmtNum(b.deletions)}
+              </TooltipContent>
+            </Tooltip>
+          );
+        })}
+      </div>
+      <div className="mt-1 flex justify-between text-[10px] text-[var(--text-secondary)]">
+        <span>{buckets[0]?.week_start.slice(5) ?? ""}</span>
+        <span>now</span>
+      </div>
+    </div>
+  );
+}
+
 function DayOfWeekChart({ histogram }: { histogram: number[] }) {
   const max = Math.max(1, ...histogram);
   return (
     <div className="rounded-md border border-[var(--cv-line)] bg-[var(--bg-raised)] p-3">
       <div className="cv-label mb-2">Commits by day of week (all time)</div>
-      <div className="flex h-16 items-end gap-1">
+      <div className="flex h-20 items-end gap-1">
         {histogram.map((n, i) => (
           <Tooltip key={i}>
             <TooltipTrigger asChild>
-              <div className="flex flex-1 flex-col items-center justify-end">
+              <div className="flex h-full flex-1 flex-col items-center justify-end">
                 <div
                   className="w-full rounded-sm bg-[var(--cv-accent)]/70"
                   style={{ height: `${(n / max) * 100}%`, minHeight: "2px" }}
@@ -678,6 +609,121 @@ function DayOfWeekChart({ histogram }: { histogram: number[] }) {
             {d}
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function HourOfWeekHeatmap({ grid }: { grid: number[][] }) {
+  const max = Math.max(1, ...grid.flat());
+  return (
+    <div className="rounded-md border border-[var(--cv-line)] bg-[var(--bg-raised)] p-3">
+      <div className="cv-label mb-2">When you commit (hour × weekday, UTC)</div>
+      <div className="space-y-[2px]">
+        {grid.map((row, wd) => (
+          <div key={wd} className="flex items-center gap-1">
+            <span className="w-6 shrink-0 font-mono text-[9px] text-[var(--text-secondary)]">
+              {WEEKDAY_LABELS[wd]}
+            </span>
+            <div className="flex flex-1 gap-[1px]">
+              {row.map((cell, h) => {
+                const intensity = cell / max;
+                const bg =
+                  cell === 0
+                    ? "rgba(125,211,252,0)"
+                    : `rgba(125,211,252,${0.15 + intensity * 0.85})`;
+                return (
+                  <Tooltip key={h}>
+                    <TooltipTrigger asChild>
+                      <div
+                        className="h-3 flex-1 rounded-[1px]"
+                        style={{
+                          backgroundColor: bg,
+                          border:
+                            cell === 0
+                              ? "1px solid var(--bg-surface)"
+                              : "1px solid transparent",
+                        }}
+                      />
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="text-[10px]">
+                      {WEEKDAY_LABELS[wd]} {String(h).padStart(2, "0")}:00 · {cell} commits
+                    </TooltipContent>
+                  </Tooltip>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-1 flex justify-between pl-7 text-[9px] text-[var(--text-secondary)]">
+        <span>00</span>
+        <span>06</span>
+        <span>12</span>
+        <span>18</span>
+        <span>23</span>
+      </div>
+    </div>
+  );
+}
+
+function TopDirectoriesSection({ dirs }: { dirs: DirectoryChurn[] }) {
+  if (dirs.length === 0) return null;
+  const max = Math.max(1, ...dirs.map((d) => d.additions + d.deletions));
+  return (
+    <div>
+      <div className="cv-label mb-2">Hot directories (all time)</div>
+      <div className="overflow-hidden rounded-md border border-[var(--cv-line)] bg-[var(--bg-raised)]">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-[var(--cv-line)] text-[var(--text-secondary)]">
+              <th className="px-3 py-2 text-left font-normal">directory</th>
+              <th className="px-3 py-2 text-right font-normal">commits</th>
+              <th className="px-3 py-2 text-right font-normal">AI</th>
+              <th className="px-3 py-2 text-right font-normal">human</th>
+              <th className="px-3 py-2 text-right font-normal">+lines</th>
+              <th className="px-3 py-2 text-right font-normal">−lines</th>
+              <th className="px-3 py-2 text-left font-normal">churn</th>
+            </tr>
+          </thead>
+          <tbody>
+            {dirs.map((d) => {
+              const churn = d.additions + d.deletions;
+              const pct = (churn / max) * 100;
+              return (
+                <tr
+                  key={d.path}
+                  className="border-b border-[var(--cv-line)]/40 last:border-0"
+                >
+                  <td className="px-3 py-1.5 font-mono text-[11px]">{d.path}</td>
+                  <td className="px-3 py-1.5 text-right font-mono">
+                    {d.commits.toLocaleString()}
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono text-[var(--cv-accent)]">
+                    {d.ai_commits} ({fmtPct(d.ai_commits, d.ai_commits + d.human_commits)})
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono">
+                    {d.human_commits}
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono">
+                    +{fmtNum(d.additions)}
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono">
+                    −{fmtNum(d.deletions)}
+                  </td>
+                  <td className="px-3 py-1.5">
+                    <div className="h-1.5 w-32 rounded-full bg-[var(--bg-surface)]">
+                      <div
+                        className="h-full rounded-full bg-[var(--cv-accent)]/60"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );
@@ -810,166 +856,6 @@ function TopFilesSection({ files }: { files: FileChurn[] }) {
   );
 }
 
-// ─── Tool breakdown grid ────────────────────────────────────────────────────
-
-function ToolBreakdownGrid({ rows }: { rows: ToolBreakdownRow[] }) {
-  return (
-    <div className="grid gap-3 lg:grid-cols-2">
-      {rows.map((r) => (
-        <ToolCard key={r.tool} row={r} />
-      ))}
-    </div>
-  );
-}
-
-function ToolCard({ row }: { row: ToolBreakdownRow }) {
-  const maxDailyCost = Math.max(1, ...row.daily_cost.map((d) => d.cost_usd));
-  return (
-    <div className="rounded-md border border-[var(--cv-line)] bg-[var(--bg-raised)] p-3">
-      <div className="flex items-baseline justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span
-            className="h-3 w-3 rounded-sm"
-            style={{ backgroundColor: toolColor(row.tool) }}
-          />
-          <span className="text-sm font-semibold">{prettyTool(row.tool)}</span>
-          <span className="text-xs text-[var(--text-secondary)]">
-            {row.sessions.toLocaleString()} sessions
-          </span>
-        </div>
-        <span className="font-mono text-sm">{fmtUsd(row.estimated_cost_usd)}</span>
-      </div>
-
-      <div className="mt-2 grid grid-cols-4 gap-1 text-[10px] text-[var(--text-secondary)]">
-        <div>
-          <div className="cv-label">input</div>
-          <div className="font-mono text-[11px] text-[var(--text-primary)]">
-            {fmtTokens(row.real_input_tokens)}
-          </div>
-        </div>
-        <div>
-          <div className="cv-label">output</div>
-          <div className="font-mono text-[11px] text-[var(--text-primary)]">
-            {fmtTokens(row.output_tokens)}
-          </div>
-        </div>
-        <div>
-          <div className="cv-label text-emerald-400/80">cache read</div>
-          <div className="font-mono text-[11px] text-emerald-200">
-            {fmtTokens(row.cache_read_tokens)}
-          </div>
-        </div>
-        <div>
-          <div className="cv-label text-amber-400/80">cache write</div>
-          <div className="font-mono text-[11px] text-amber-200">
-            {fmtTokens(row.cache_creation_tokens)}
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-2 flex justify-between gap-2 text-[10px] text-[var(--text-secondary)]">
-        <span>
-          avg session: <span className="font-mono">{fmtSeconds(row.avg_session_seconds)}</span>
-        </span>
-        <span>
-          p50: <span className="font-mono">{fmtUsd(row.cost_p50_usd)}</span>{" · "}
-          p95: <span className="font-mono">{fmtUsd(row.cost_p95_usd)}</span>
-        </span>
-      </div>
-
-      {row.models.length > 0 && (
-        <div className="mt-3">
-          <div className="cv-label mb-1.5">model split</div>
-          <div className="space-y-1">
-            {row.models.map((m) => (
-              <div
-                key={m.model}
-                className="flex items-center justify-between gap-2 text-[11px]"
-              >
-                <span className="font-mono text-[var(--text-secondary)]">
-                  {m.model}
-                </span>
-                <span className="font-mono text-[var(--text-secondary)]">
-                  {m.sessions} · {fmtUsd(m.estimated_cost_usd)}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {row.daily_cost.some((d) => d.cost_usd > 0) && (
-        <div className="mt-3">
-          <div className="cv-label mb-1.5">
-            $ over time ({row.daily_cost.length}d)
-          </div>
-          <div className="flex h-8 items-end gap-[2px]">
-            {row.daily_cost.map((d, i) => (
-              <Tooltip key={i}>
-                <TooltipTrigger asChild>
-                  <div
-                    className="flex-1 rounded-sm bg-[var(--cv-accent)]/50"
-                    style={{
-                      height: `${(d.cost_usd / maxDailyCost) * 100}%`,
-                      minHeight: "1px",
-                    }}
-                  />
-                </TooltipTrigger>
-                <TooltipContent side="top" className="text-[10px]">
-                  {d.date}: {fmtUsd(d.cost_usd)}
-                </TooltipContent>
-              </Tooltip>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function PricingTooltip({ pricing }: { pricing: PricingRow[] }) {
-  if (pricing.length === 0) return null;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          className="ml-1 text-[var(--text-secondary)] hover:text-[var(--cv-accent)]"
-        >
-          <HelpCircle size={12} />
-        </button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom" className="max-w-md text-[10px]">
-        <div className="mb-1 font-semibold text-[var(--cv-accent)]">
-          Per-million-token pricing
-        </div>
-        <table className="w-full font-mono">
-          <thead>
-            <tr className="text-[var(--text-secondary)]">
-              <th className="pr-2 text-left font-normal">model</th>
-              <th className="pr-2 text-right font-normal">in</th>
-              <th className="pr-2 text-right font-normal">out</th>
-              <th className="pr-2 text-right font-normal">cache R</th>
-              <th className="pr-2 text-right font-normal">cache W</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pricing.map((p) => (
-              <tr key={p.model}>
-                <td className="pr-2">{p.model}</td>
-                <td className="pr-2 text-right">${p.input_per_mtok}</td>
-                <td className="pr-2 text-right">${p.output_per_mtok}</td>
-                <td className="pr-2 text-right">${p.cache_read_per_mtok}</td>
-                <td className="pr-2 text-right">${p.cache_write_per_mtok}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div className="mt-1 text-[9px] text-[var(--text-secondary)]">
-          Cost = base_input × in + output × out + cache_read × R + cache_write × W
-        </div>
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
+// silence unused-import warnings for now-unused symbols
+void Bot;
+void User;
