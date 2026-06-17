@@ -16,6 +16,49 @@ use tauri::Manager;
 #[derive(Clone)]
 pub struct DbState(pub Arc<Mutex<rusqlite::Connection>>);
 
+/// Repair `PATH` for GUI launches.
+///
+/// When the app is started from Finder/Dock (not a terminal), macOS gives it a
+/// bare `PATH` of `/usr/bin:/bin:/usr/sbin:/sbin`. Tools installed by Homebrew
+/// (`/opt/homebrew/bin` on Apple Silicon, `/usr/local/bin` on Intel) and user
+/// installs (`~/.local/bin`) are then invisible, so `StdCommand::new("gh")`
+/// fails with "not found" and GitHub auth detection reports "not connected"
+/// even though the user is fully signed in via the `gh` CLI in their terminal.
+///
+/// We unconditionally *prepend* the common install dirs that aren't already on
+/// `PATH`. This is instant and can never hang (unlike sourcing a login shell),
+/// and it fixes every `gh`/`git`/`curl` spawn at once.
+fn repair_path_for_gui() {
+    let existing = std::env::var("PATH").unwrap_or_default();
+    let present: std::collections::HashSet<&str> =
+        existing.split(':').filter(|s| !s.is_empty()).collect();
+
+    let mut prefix: Vec<String> = Vec::new();
+    let mut candidates = vec![
+        "/opt/homebrew/bin".to_string(),
+        "/opt/homebrew/sbin".to_string(),
+        "/usr/local/bin".to_string(),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(format!("{home}/.local/bin"));
+    }
+    for dir in candidates {
+        if !present.contains(dir.as_str()) && std::path::Path::new(&dir).is_dir() {
+            prefix.push(dir);
+        }
+    }
+    if prefix.is_empty() {
+        return;
+    }
+    let new_path = if existing.is_empty() {
+        prefix.join(":")
+    } else {
+        format!("{}:{}", prefix.join(":"), existing)
+    };
+    std::env::set_var("PATH", &new_path);
+    log::info!("repair_path_for_gui: prepended {}", prefix.join(":"));
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -25,6 +68,11 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // v1.1.85: GUI launches inherit a bare PATH that hides Homebrew's
+            // `gh`/`git`, which broke GitHub auth detection. Repair it before
+            // anything shells out.
+            repair_path_for_gui();
+
             let app_data_dir = app
                 .path()
                 .app_data_dir()

@@ -186,10 +186,21 @@ pub async fn check_github_auth(db: State<'_, DbState>) -> Result<Value, String> 
             // Get the actual token for later use
             let token_output = StdCommand::new("gh").args(["auth", "token"]).output().ok();
 
-            let has_token = token_output
+            let token = token_output
                 .as_ref()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|t| !t.is_empty());
+            let has_token = token.is_some();
+
+            // Persist the token to preferences so background features that read
+            // `github_token` (e.g. the T-Rex watcher posting commit statuses)
+            // work the moment auth is detected — without a separate sync step.
+            if let Some(ref t) = token {
+                if let Ok(conn) = db.0.lock() {
+                    let _ = queries::set_preference(&conn, "github_token", t);
+                }
+            }
 
             return Ok(json!({
                 "connected": true,
