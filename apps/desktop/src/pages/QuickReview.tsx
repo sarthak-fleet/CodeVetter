@@ -1056,6 +1056,11 @@ export default function QuickReview() {
   const [diffRange, setDiffRange] = useState("");
   const [proofCopied, setProofCopied] = useState(false);
   const [findingNoteCopied, setFindingNoteCopied] = useState(false);
+  // Collapsed by default: the verification detail (procedure gates, event
+  // timeline, intent check, unchecked-risk ledger) lives behind one toggle so
+  // the right panel leads with the handoff-proof summary, not four stacked,
+  // equal-weight sections.
+  const [verificationOpen, setVerificationOpen] = useState(false);
 
   // ─── Load saved folder + branches on mount ───────────────────────────────
 
@@ -5052,7 +5057,77 @@ export default function QuickReview() {
               </div>
             )}
 
-            {evidenceProcedureSteps.length > 0 && (
+            {/* Verification group — always-visible summary header + toggle.
+                Collapses the detail sections (gates, timeline, intent, risk
+                ledger) so the panel isn't four stacked equal-weight blocks. */}
+            {(sortedFindings.length > 0 ||
+              evidenceProcedureSteps.length > 0 ||
+              procedureExecutionEvents.length > 0 ||
+              intentReport ||
+              uncheckedFindings.length > 0) && (
+              <div className="shrink-0 border-t border-[var(--cv-line)] bg-[#07080a] px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setVerificationOpen((o) => !o)}
+                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                  >
+                    {verificationOpen ? (
+                      <ChevronDown size={12} className="shrink-0 text-slate-500" />
+                    ) : (
+                      <ChevronRight size={12} className="shrink-0 text-slate-500" />
+                    )}
+                    <ClipboardCheck size={12} className="shrink-0 text-[var(--cv-accent)]" />
+                    <span className="cv-label shrink-0 text-slate-300">Verification</span>
+                    <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 font-mono text-[10px]">
+                      <span className="text-emerald-400">{evidenceCounts.fixed} fixed</span>
+                      <span className="text-slate-700">·</span>
+                      <span className="text-yellow-400">{evidenceCounts.reproduced} reproduced</span>
+                      <span className="text-slate-700">·</span>
+                      <span className="text-slate-500">{uncheckedFindings.length} unchecked</span>
+                    </span>
+                  </button>
+                  {sortedFindings.length > 0 && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={handleCopyProof}
+                        className="h-6 shrink-0 gap-1 px-2 text-[10px] text-slate-500 hover:text-slate-200"
+                      >
+                        {proofCopied ? (
+                          <CheckCircle size={10} className="text-emerald-400" />
+                        ) : (
+                          <Copy size={10} />
+                        )}
+                        {proofCopied ? "Copied!" : "Copy proof"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={handleCopyFindingNote}
+                        disabled={selectedFindingIdx === null}
+                        className="h-6 shrink-0 gap-1 px-2 text-[10px] text-slate-500 hover:text-slate-200 disabled:opacity-40"
+                        title={
+                          selectedFindingIdx === null
+                            ? "Select a finding to copy its context note"
+                            : "Copy selected finding context note"
+                        }
+                      >
+                        {findingNoteCopied ? (
+                          <CheckCircle size={10} className="text-emerald-400" />
+                        ) : (
+                          <FileCode size={10} />
+                        )}
+                        {findingNoteCopied ? "Copied!" : "Copy note"}
+                      </Button>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {verificationOpen && evidenceProcedureSteps.length > 0 && (
               <div className="shrink-0 border-t border-[var(--cv-line)] bg-[#07080a] px-3 py-2">
                 <div className="mb-2 flex items-center gap-2">
                   <ClipboardCheck size={12} className="shrink-0 text-cyan-300" />
@@ -5118,7 +5193,7 @@ export default function QuickReview() {
               </div>
             )}
 
-            {procedureExecutionEvents.length > 0 && (
+            {verificationOpen && procedureExecutionEvents.length > 0 && (
               <div className="shrink-0 border-t border-[var(--cv-line)] bg-[#07080a] px-3 py-2">
                 <div className="mb-2 flex items-center gap-2">
                   <History size={12} className="shrink-0 text-cyan-300" />
@@ -5165,7 +5240,7 @@ export default function QuickReview() {
             )}
 
             {/* Intent-level verification gaps */}
-            {intentReport && (
+            {verificationOpen && intentReport && (
               <div className="shrink-0 border-t border-[var(--cv-line)] bg-[#07080a] px-3 py-2">
                 <div className="flex items-center gap-2">
                   <GitCommitHorizontal size={12} className="shrink-0 text-cyan-300" />
@@ -5221,7 +5296,7 @@ export default function QuickReview() {
             )}
 
             {/* Unchecked-finding risk summary — why "unchecked" still matters */}
-            {uncheckedFindings.length > 0 && (
+            {verificationOpen && uncheckedFindings.length > 0 && (
               <div className="shrink-0 border-t border-[var(--cv-line)] bg-[#07080a] px-3 py-2">
                 <div className="flex items-center gap-2">
                   <AlertTriangle size={12} className="shrink-0 text-yellow-400" />
@@ -5261,56 +5336,6 @@ export default function QuickReview() {
                     );
                   })}
                 </ul>
-              </div>
-            )}
-
-            {/* Verification handoff proof */}
-            {sortedFindings.length > 0 && (
-              <div className="shrink-0 border-t border-[var(--cv-line)] bg-[#07080a] px-3 py-2">
-                <div className="flex items-center gap-2">
-                  <ClipboardCheck size={12} className="shrink-0 text-[var(--cv-accent)]" />
-                  <div className="flex flex-1 flex-wrap items-center gap-x-2 font-mono text-[10px]">
-                    <span className="text-emerald-400">{evidenceCounts.fixed} fixed</span>
-                    <span className="text-slate-700">·</span>
-                    <span className="text-yellow-400">{evidenceCounts.reproduced} reproduced</span>
-                    <span className="text-slate-700">·</span>
-                    <span className="text-slate-500">
-                      {uncheckedFindings.length} unchecked
-                    </span>
-                  </div>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={handleCopyProof}
-                    className="h-6 shrink-0 gap-1 px-2 text-[10px] text-slate-500 hover:text-slate-200"
-                  >
-                    {proofCopied ? (
-                      <CheckCircle size={10} className="text-emerald-400" />
-                    ) : (
-                      <Copy size={10} />
-                    )}
-                    {proofCopied ? "Copied!" : "Copy proof"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={handleCopyFindingNote}
-                    disabled={selectedFindingIdx === null}
-                    className="h-6 shrink-0 gap-1 px-2 text-[10px] text-slate-500 hover:text-slate-200 disabled:opacity-40"
-                    title={
-                      selectedFindingIdx === null
-                        ? "Select a finding to copy its context note"
-                        : "Copy selected finding context note"
-                    }
-                  >
-                    {findingNoteCopied ? (
-                      <CheckCircle size={10} className="text-emerald-400" />
-                    ) : (
-                      <FileCode size={10} />
-                    )}
-                    {findingNoteCopied ? "Copied!" : "Copy note"}
-                  </Button>
-                </div>
               </div>
             )}
 
