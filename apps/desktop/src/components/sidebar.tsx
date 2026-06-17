@@ -2,6 +2,7 @@ import { BookOpenText, ClipboardCheck, Eye, Gauge, Home, Map, MessageSquare, Roc
 import { type ReactNode,useEffect, useRef, useState } from "react";
 import { Link, useLocation,useNavigate } from "react-router-dom";
 
+import ResourceChip from "@/components/ResourceChip";
 import { Separator } from "@/components/ui/separator";
 import {
   Tooltip,
@@ -190,6 +191,11 @@ export default function Sidebar() {
         <span className="ml-1 hidden text-[11px] font-medium text-slate-500 sm:inline">
           {currentPage}
         </span>
+
+        {/* Live resource usage chip — CPU / RAM / disk for the CodeVetter
+            process tree. Click for breakdown by child process. */}
+        <Separator orientation="vertical" className="mx-1 h-5 bg-[var(--cv-line)]" />
+        <ResourceChip />
 
         {/* Signed-in avatar chip — appears once the user authenticates with
             SaaS Maker. Clicks through to /settings so they can sign out. */}

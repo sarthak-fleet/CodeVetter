@@ -25,6 +25,7 @@ base64 = "0.22"
 automerge = "0.5"
 chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 futures = "0.3"
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

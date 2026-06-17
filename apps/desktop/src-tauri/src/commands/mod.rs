@@ -15,6 +15,7 @@ pub mod observability;
 pub mod persona;
 pub mod preferences;
 pub mod procedure_events;
+pub mod resources;
 pub mod review;
 pub mod saas_maker;
 pub mod sandbox;

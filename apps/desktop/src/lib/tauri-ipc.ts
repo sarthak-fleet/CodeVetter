@@ -236,6 +236,32 @@ export interface IndexStats {
   last_indexed_at: string | null;
 }
 
+/** v1.1.84 — live resource sampling for the top-nav chip. */
+export interface ResourceProcessSample {
+  pid: number;
+  name: string;
+  cpu_percent: number;
+  ram_bytes: number;
+}
+
+export interface ResourceSnapshot {
+  sampled_at: string;
+  self_pid: number;
+  cpu_percent: number;
+  cpu_count: number;
+  ram_bytes: number;
+  disk_read_per_sec: number;
+  disk_write_per_sec: number;
+  gpu_percent: number | null;
+  net_in_per_sec: number | null;
+  net_out_per_sec: number | null;
+  children: ResourceProcessSample[];
+}
+
+export async function getResourceSnapshot(): Promise<ResourceSnapshot> {
+  return safeInvoke<ResourceSnapshot>("get_resource_snapshot");
+}
+
 export interface TriggerIndexResult {
   indexed_sessions: number;
   indexed_messages: number;

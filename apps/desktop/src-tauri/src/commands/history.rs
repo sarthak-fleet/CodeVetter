@@ -162,6 +162,11 @@ fn run_full_index_unlocked(conn: &rusqlite::Connection) -> Result<FullIndexSumma
     let now = chrono::Utc::now().to_rfc3339();
     let _ = queries::set_preference(conn, "last_indexed_at", &now);
 
+    // v1.1.84: truncate the WAL after every index pass. Without this, writes
+    // from the 5-minute re-indexer accumulate over hours/days into a multi-
+    // hundred-megabyte `codevetter.db-wal`, bloating both disk and the mmap.
+    let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+
     Ok(FullIndexSummary {
         indexed_sessions,
         indexed_messages,

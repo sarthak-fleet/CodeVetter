@@ -33,6 +33,7 @@ fn main() {
             let conn = db::init_db(app_data_dir.clone()).expect("failed to initialize database");
             app.manage(DbState(Arc::new(Mutex::new(conn))));
             app.manage(commands::trex_watcher::WatcherHandles::new());
+            app.manage(commands::resources::ResourceState::new());
 
             // v1.1.83: resume any T-Rex watchers that were enabled before the
             // last shutdown. Each enabled row spawns its own Tokio polling task.
@@ -131,7 +132,12 @@ fn main() {
                                 log::error!("Periodic re-index DB init failed: {e}");
                             }
                         }
-                        std::thread::sleep(std::time::Duration::from_secs(30));
+                        // v1.1.84: bumped from 30s → 5min. The indexer was
+                        // re-reading large active JSONL files (>100 MB) into
+                        // memory on every tick, hammering CPU + SSD without
+                        // a meaningful UX improvement; token-usage stats are
+                        // still fresh enough for a passive monitor.
+                        std::thread::sleep(std::time::Duration::from_secs(300));
                     }
                 })
                 .expect("failed to spawn periodic-index thread");
@@ -251,6 +257,8 @@ fn main() {
             commands::observability::send_notification,
             // v1.1.82: persona generator (Featurely-style)
             commands::persona::generate_personas,
+            // v1.1.84: live resource monitor for the chip in the top nav
+            commands::resources::get_resource_snapshot,
             // v1.1.83: T-Rex v2 watcher — background PR scanner + GitHub status check
             commands::trex_watcher::start_trex_watcher,
             commands::trex_watcher::stop_trex_watcher,
