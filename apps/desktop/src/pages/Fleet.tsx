@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   Clipboard,
   ClipboardCheck,
+  Link2,
   Loader2,
   Rocket,
   Send,
@@ -32,6 +33,8 @@ import {
   generateWeeklyFleetMarkdown,
   getFleetRollup,
   isTauriAvailable,
+  linkAllReposToFleet,
+  type LinkAllResult,
   pushChangelogEntry,
   type WeeklyFleetMarkdown,
   type WindowReport,
@@ -67,6 +70,10 @@ export default function Fleet() {
   const [pushTarget, setPushTarget] = useState<string>("");
   const [pushing, setPushing] = useState(false);
   const [pushed, setPushed] = useState<string | null>(null);
+
+  // Bulk-link state
+  const [linking, setLinking] = useState(false);
+  const [linkResult, setLinkResult] = useState<LinkAllResult | null>(null);
 
   const refresh = useCallback(async () => {
     if (!isTauriAvailable()) return;
@@ -128,6 +135,22 @@ export default function Fleet() {
     }
   }, [report, pushTarget]);
 
+  const handleLinkAll = useCallback(async () => {
+    if (!isTauriAvailable()) return;
+    setLinking(true);
+    setError(null);
+    setLinkResult(null);
+    try {
+      const r = await linkAllReposToFleet();
+      setLinkResult(r);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLinking(false);
+    }
+  }, [refresh]);
+
   const linkedProjects = useMemo(
     () => rollup?.projects.filter((p) => p.linked) ?? [],
     [rollup],
@@ -158,21 +181,78 @@ export default function Fleet() {
               locally; unlinked projects are listed so you can link them.
             </p>
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={refresh}
-            disabled={loading}
-          >
-            {loading ? (
-              <Loader2 size={14} className="mr-1.5 animate-spin" />
-            ) : (
-              <Sparkles size={14} className="mr-1.5" />
-            )}
-            Refresh
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              onClick={handleLinkAll}
+              disabled={linking}
+              title="Match every indexed local repo to a fleet project by name and save the links"
+            >
+              {linking ? (
+                <Loader2 size={14} className="mr-1.5 animate-spin" />
+              ) : (
+                <Link2 size={14} className="mr-1.5" />
+              )}
+              Link all repos
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={refresh}
+              disabled={loading}
+            >
+              {loading ? (
+                <Loader2 size={14} className="mr-1.5 animate-spin" />
+              ) : (
+                <Sparkles size={14} className="mr-1.5" />
+              )}
+              Refresh
+            </Button>
+          </div>
         </header>
+
+        {linkResult && (
+          <div className="mb-4 rounded-md border border-cyan-500/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100">
+            <div className="flex items-center gap-2 font-medium">
+              <CheckCircle2 size={16} className="shrink-0 text-emerald-300" />
+              Linked {linkResult.linked.length} of {linkResult.scanned_repo_count}{" "}
+              local repos
+              {linkResult.unmatched_repo_count > 0
+                ? ` · ${linkResult.unmatched_repo_count} unmatched`
+                : ""}
+            </div>
+            {linkResult.git_url_supported ? (
+              <p className="mt-1 text-xs text-cyan-200/80">
+                Backfilled git_url onto {linkResult.backfilled_count} project
+                {linkResult.backfilled_count === 1 ? "" : "s"} on the fleet spine.
+              </p>
+            ) : (
+              <p className="mt-1 text-xs text-amber-200/90">
+                Saved locally only — the SaaS Maker API doesn&apos;t expose{" "}
+                <span className="font-mono">git_url</span> yet, so nothing was
+                written to the spine. Merge &amp; deploy{" "}
+                <span className="font-mono">feat/projects-git-url</span> to enable
+                fleet-wide backfill.
+              </p>
+            )}
+            {linkResult.linked.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {linkResult.linked.map((l) => (
+                  <span
+                    key={l.repo_path}
+                    className="rounded-full border border-cyan-500/30 bg-[var(--bg-raised)] px-2 py-0.5 font-mono text-[10px] text-cyan-100"
+                    title={l.repo_path}
+                  >
+                    {l.project_name}
+                    {l.backfilled ? " ✓" : ""}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {error && (
           <div className="mb-4 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">

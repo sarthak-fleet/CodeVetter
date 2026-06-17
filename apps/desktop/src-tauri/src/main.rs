@@ -285,6 +285,7 @@ fn main() {
             commands::saas_maker::get_current_user,
             commands::saas_maker::detect_project_for_repo,
             commands::saas_maker::set_repo_project_mapping,
+            commands::saas_maker::link_all_repos_to_fleet,
             // v1.1.78: cross-fleet rollup + AI acceleration + weekly markdown
             commands::intel::get_ai_acceleration,
             commands::fleet::list_linked_repos,

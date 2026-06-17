@@ -2468,6 +2468,33 @@ export async function setRepoProjectMapping(
   });
 }
 
+export interface LinkedRepoEntry {
+  project_name: string;
+  project_slug: string;
+  repo_path: string;
+  origin_url: string | null;
+  backfilled: boolean;
+  backfill_error: string | null;
+}
+
+export interface LinkAllResult {
+  /** Whether the SaaS Maker API exposes a git_url field; backfill is skipped when false. */
+  git_url_supported: boolean;
+  scanned_repo_count: number;
+  linked: LinkedRepoEntry[];
+  unmatched_repo_count: number;
+  backfilled_count: number;
+}
+
+/**
+ * Bulk-link every indexed local git repo to its matching fleet project by name,
+ * persisting local mappings. When the spine supports git_url, also backfills
+ * each repo's origin URL onto the project.
+ */
+export async function linkAllReposToFleet(): Promise<LinkAllResult> {
+  return safeInvoke<LinkAllResult>("link_all_repos_to_fleet");
+}
+
 // ─── v1.1.78: cross-fleet rollup + AI acceleration + weekly markdown ────────
 
 export interface AiAcceleration {
