@@ -294,8 +294,6 @@ fn main() {
             commands::fleet::push_changelog_entry,
             // v1.1.79: DORA metrics
             commands::dora::get_dora_metrics,
-            // v1.1.80: Ask CodeVetter — NL Q&A over fleet+repo data
-            commands::ask::ask_codevetter,
             // v1.1.81: real billing + agent observability + notifications
             commands::observability::get_billing_config,
             commands::observability::set_billing_config,
@@ -304,8 +302,6 @@ fn main() {
             commands::observability::get_webhook_config,
             commands::observability::set_webhook_config,
             commands::observability::send_notification,
-            // v1.1.82: persona generator (Featurely-style)
-            commands::persona::generate_personas,
             // v1.1.84: live resource monitor for the chip in the top nav
             commands::resources::get_resource_snapshot,
             // v1.1.83: T-Rex v2 watcher — background PR scanner + GitHub status check

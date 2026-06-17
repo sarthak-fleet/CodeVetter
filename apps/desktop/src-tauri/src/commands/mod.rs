@@ -1,6 +1,5 @@
 pub mod accounts;
 pub mod agent;
-pub mod ask;
 pub mod agent_memories;
 pub mod blast_radius;
 pub mod dora;
@@ -12,7 +11,6 @@ pub mod github_ops;
 pub mod history;
 pub mod intel;
 pub mod observability;
-pub mod persona;
 pub mod preferences;
 pub mod procedure_events;
 pub mod resources;

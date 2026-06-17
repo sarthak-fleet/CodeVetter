@@ -2608,26 +2608,6 @@ export async function getDoraMetrics(
   });
 }
 
-// ─── v1.1.80: Ask CodeVetter ────────────────────────────────────────────────
-
-export interface AskInput {
-  question: string;
-  repo_path?: string | null;
-  provider?: "claude" | "codex";
-  include_fleet?: boolean;
-}
-
-export interface AskResult {
-  answer: string;
-  context_bytes: number;
-  provider: string;
-  took_ms: number;
-}
-
-export async function askCodevetter(input: AskInput): Promise<AskResult> {
-  return safeInvoke<AskResult>("ask_codevetter", { input });
-}
-
 // ─── v1.1.81: billing + agent obs + webhook notifications ───────────────────
 
 export interface BillingConfig {
@@ -2716,40 +2696,6 @@ export async function sendWebhookNotification(
   input: SendNotificationInput,
 ): Promise<void> {
   return safeInvoke<void>("send_notification", { input });
-}
-
-// ─── v1.1.82: persona generator ─────────────────────────────────────────────
-
-export interface PersonaArchetype {
-  name: string;
-  one_liner: string;
-  population_pct: number;
-  representative_handles: string[];
-  signals: string[];
-  jobs_to_be_done: string[];
-}
-
-export interface PersonaReport {
-  repo: string;
-  sample_size: number;
-  stargazer_count: number;
-  issue_author_count: number;
-  archetypes: PersonaArchetype[];
-  summary: string;
-  took_ms: number;
-  warnings: string[];
-}
-
-export interface PersonaInput {
-  repo: string;
-  sample_size?: number;
-  provider?: "claude" | "codex";
-}
-
-export async function generatePersonas(
-  input: PersonaInput,
-): Promise<PersonaReport> {
-  return safeInvoke<PersonaReport>("generate_personas", { input });
 }
 
 // ─── T-Rex v2 watcher (v1.1.83) ────────────────────────────────────────────
