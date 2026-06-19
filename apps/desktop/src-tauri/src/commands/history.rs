@@ -896,27 +896,214 @@ fn parse_claude_session(
     project_id: &str,
     now: &str,
 ) -> Result<IndexedAdapterSession, String> {
-    let jsonl_path_str = jsonl_path.to_string_lossy().to_string();
+    index_adapter_session(&ClaudeCodeAdapter, jsonl_path, conn, project_id, now)
+}
+
+/// Prefix of `text` up to and including the last newline, plus its byte length and
+/// complete-line count. A half-written trailing line (no newline yet) is excluded,
+/// so the indexer never parses a partially-flushed event and always resumes on a
+/// clean line boundary. Returns ("", 0, 0) when there is no newline at all.
+fn complete_lines_prefix(text: &str) -> (&str, i64, i64) {
+    match text.rfind('\n') {
+        Some(pos) => {
+            let end = pos + 1; // include the '\n'
+            let prefix = &text[..end];
+            let line_count = prefix.lines().count() as i64;
+            (prefix, end as i64, line_count)
+        }
+        None => ("", 0, 0),
+    }
+}
+
+/// Index one agent session file, incrementally when possible.
+///
+/// If the session was indexed before and the file only grew, seek to the saved
+/// byte offset, parse just the appended tail, and merge the deltas — turning the
+/// per-append cost from O(file size) into O(bytes appended). Otherwise (first
+/// index, a legacy session with no cursor, or a file that shrank/rotated) do a
+/// full parse. See docs/PERFORMANCE.md.
+fn index_adapter_session<A: SessionSourceAdapter>(
+    adapter: &A,
+    jsonl_path: &std::path::Path,
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    now: &str,
+) -> Result<IndexedAdapterSession, String> {
+    let path_str = jsonl_path.to_string_lossy().to_string();
     let file_meta = std::fs::metadata(jsonl_path).ok();
     let file_size = file_meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
-    let file_mtime_str = file_meta
+    let file_mtime = file_meta
         .as_ref()
         .and_then(|m| m.modified().ok())
         .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
 
-    let raw = std::fs::read_to_string(jsonl_path).map_err(|e| e.to_string())?;
-    let summary = ClaudeCodeAdapter.parse_raw(&jsonl_path_str, &raw);
     let existing =
-        queries::get_session_by_jsonl_path(conn, &jsonl_path_str).map_err(|e| e.to_string())?;
-    upsert_adapter_summary_session(
+        queries::get_session_by_jsonl_path(conn, &path_str).map_err(|e| e.to_string())?;
+
+    if let Some(meta) = &existing {
+        let (offset, line_count) =
+            queries::get_session_index_cursor(conn, &meta.id).map_err(|e| e.to_string())?;
+        // Incremental only when we have a real cursor and the file didn't shrink.
+        if offset > 0 && file_size >= offset {
+            return index_session_incremental(
+                adapter, conn, &path_str, meta, offset, line_count, file_size, file_mtime, now,
+            );
+        }
+        // offset == 0 (never cursored) or file shrank → fall through to full parse.
+    }
+
+    // Full parse: read the whole file but only commit complete lines, so the
+    // cursor lands on a newline boundary exactly like the incremental path.
+    let raw = std::fs::read_to_string(jsonl_path).map_err(|e| e.to_string())?;
+    let (prefix, byte_len, line_count) = complete_lines_prefix(&raw);
+    let summary = adapter.parse_raw(&path_str, prefix);
+    let existing_id = existing.as_ref().map(|m| m.id.as_str());
+    let result =
+        upsert_adapter_summary_session(conn, project_id, summary, file_size, file_mtime, now, existing_id)?;
+    queries::set_session_index_cursor(conn, &result.session_id, byte_len, line_count)
+        .map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn index_session_incremental<A: SessionSourceAdapter>(
+    adapter: &A,
+    conn: &rusqlite::Connection,
+    path_str: &str,
+    meta: &queries::SessionMeta,
+    offset: i64,
+    line_count: i64,
+    file_size: i64,
+    file_mtime: Option<String>,
+    now: &str,
+) -> Result<IndexedAdapterSession, String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut tail = String::new();
+    if file_size > offset {
+        let mut f = std::fs::File::open(path_str).map_err(|e| e.to_string())?;
+        f.seek(SeekFrom::Start(offset as u64))
+            .map_err(|e| e.to_string())?;
+        f.read_to_string(&mut tail).map_err(|e| e.to_string())?;
+    }
+    let (prefix, new_bytes, new_lines) = complete_lines_prefix(&tail);
+
+    // No complete new line yet (e.g. a half-flushed event, or only mtime changed).
+    // Refresh size/mtime so the mtime-skip works next pass; nothing new to index.
+    if prefix.is_empty() {
+        let _ = queries::apply_session_append_delta(conn, &zero_delta(meta, offset, line_count, file_size, file_mtime, now));
+        return Ok(IndexedAdapterSession {
+            session_id: meta.id.clone(),
+            source_ref: path_str.to_string(),
+            messages_indexed: 0,
+            parse_warnings: Vec::new(),
+        });
+    }
+
+    let summary = adapter.parse_raw(path_str, prefix);
+
+    // Append archive rows, continuing message_index / source_line past what is stored.
+    let start_index = meta.archived_message_count;
+    let inputs: Vec<queries::SessionMessageArchiveInput> = summary
+        .archive_messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| queries::SessionMessageArchiveInput {
+            adapter_id: summary.adapter_id.clone(),
+            agent_type: summary.agent_type.clone(),
+            source_ref: path_str.to_string(),
+            source_line: m.source_line.map(|sl| sl + line_count),
+            message_index: start_index + i as i64,
+            role: m.role.clone(),
+            kind: m.kind.clone(),
+            timestamp: m.timestamp.clone(),
+            content_text: m.content_text.clone(),
+            tool_name: m.tool_name.clone(),
+            tool_call_id: m.tool_call_id.clone(),
+            raw_type: m.raw_type.clone(),
+        })
+        .collect();
+    queries::append_session_message_archive(conn, &meta.id, &inputs).map_err(|e| e.to_string())?;
+
+    // Per-day counts are additive — bump, never reset.
+    for (day, n) in &summary.day_counts {
+        let _ = queries::bump_session_day(conn, &meta.id, day, *n);
+    }
+
+    let messages_indexed = summary.message_count.max(0) as u64;
+    let parse_warnings = summary.parse_warnings.clone();
+    queries::apply_session_append_delta(
         conn,
-        project_id,
-        summary,
-        file_size,
-        file_mtime_str,
-        now,
-        existing.as_ref().map(|m| m.id.as_str()),
+        &queries::SessionAppendDelta {
+            session_id: meta.id.clone(),
+            add_message_count: summary.message_count,
+            add_input_tokens: summary.total_input_tokens,
+            add_output_tokens: summary.total_output_tokens,
+            add_cache_read_tokens: summary.cache_read_tokens,
+            add_cache_creation_tokens: summary.cache_creation_tokens,
+            add_compaction_count: summary.compaction_count,
+            last_message: summary.last_timestamp.clone(),
+            first_message: summary.first_timestamp.clone(),
+            model_used: summary.model_used.clone(),
+            cli_version: summary.cli_version.clone(),
+            git_branch: summary.git_branch.clone(),
+            cwd: summary.cwd.clone(),
+            slug: summary.slug.clone(),
+            file_size_bytes: file_size,
+            file_mtime,
+            indexed_at: now.to_string(),
+            new_byte_offset: offset + new_bytes,
+            new_line_count: line_count + new_lines,
+        },
     )
+    .map_err(|e| e.to_string())?;
+
+    // Recompute cost from the NEW totals so it matches a one-shot full re-index
+    // exactly (estimate_cost rounds to cents — a per-delta round would drift).
+    let (ti, to, cr, cc, model) =
+        queries::get_session_token_totals(conn, &meta.id).map_err(|e| e.to_string())?;
+    let cost = estimate_cost(model.as_deref().unwrap_or(""), ti, to, cr, cc);
+    queries::set_session_cost(conn, &meta.id, cost).map_err(|e| e.to_string())?;
+
+    Ok(IndexedAdapterSession {
+        session_id: meta.id.clone(),
+        source_ref: path_str.to_string(),
+        messages_indexed,
+        parse_warnings,
+    })
+}
+
+/// A content-free delta that only refreshes file size/mtime/indexed_at and keeps
+/// the cursor where it is — used when an append carried no complete new line.
+fn zero_delta(
+    meta: &queries::SessionMeta,
+    offset: i64,
+    line_count: i64,
+    file_size: i64,
+    file_mtime: Option<String>,
+    now: &str,
+) -> queries::SessionAppendDelta {
+    queries::SessionAppendDelta {
+        session_id: meta.id.clone(),
+        add_message_count: 0,
+        add_input_tokens: 0,
+        add_output_tokens: 0,
+        add_cache_read_tokens: 0,
+        add_cache_creation_tokens: 0,
+        add_compaction_count: 0,
+        last_message: None,
+        first_message: None,
+        model_used: None,
+        cli_version: None,
+        git_branch: None,
+        cwd: None,
+        slug: None,
+        file_size_bytes: file_size,
+        file_mtime,
+        indexed_at: now.to_string(),
+        new_byte_offset: offset,
+        new_line_count: line_count,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -940,27 +1127,7 @@ fn parse_codex_session(
     project_id: &str,
     now: &str,
 ) -> Result<IndexedAdapterSession, String> {
-    let jsonl_path_str = jsonl_path.to_string_lossy().to_string();
-    let file_meta = std::fs::metadata(jsonl_path).ok();
-    let file_size = file_meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
-    let file_mtime_str = file_meta
-        .as_ref()
-        .and_then(|m| m.modified().ok())
-        .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
-
-    let raw = std::fs::read_to_string(jsonl_path).map_err(|e| e.to_string())?;
-    let summary = CodexAdapter.parse_raw(&jsonl_path_str, &raw);
-    let existing =
-        queries::get_session_by_jsonl_path(conn, &jsonl_path_str).map_err(|e| e.to_string())?;
-    upsert_adapter_summary_session(
-        conn,
-        project_id,
-        summary,
-        file_size,
-        file_mtime_str,
-        now,
-        existing.as_ref().map(|m| m.id.as_str()),
-    )
+    index_adapter_session(&CodexAdapter, jsonl_path, conn, project_id, now)
 }
 
 fn backfill_missing_session_archives(conn: &rusqlite::Connection) -> Result<u64, String> {
@@ -1871,6 +2038,206 @@ mod tests {
         )
         .expect("project");
         conn
+    }
+
+    // N deterministic, newline-terminated Claude events. Splitting these bytes at
+    // any line boundary yields a valid indexed prefix + a valid appended tail.
+    fn synth_claude_events(n: usize) -> String {
+        let mut s = String::new();
+        for i in 0..n {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            let day = 10 + (i % 3);
+            s.push_str(&format!(
+                "{{\"type\":\"{role}\",\"sessionId\":\"S\",\"version\":\"1.2.3\",\"gitBranch\":\"main\",\"cwd\":\"/p\",\"timestamp\":\"2026-06-{day:02}T0{hour}:00:00Z\",\"message\":{{\"role\":\"{role}\",\"model\":\"claude-sonnet-4\",\"content\":\"line {i}\",\"usage\":{{\"input_tokens\":{inp},\"output_tokens\":{out},\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2}}}}}}\n",
+                role = role, day = day, hour = i % 9, i = i, inp = (i as i64) + 1, out = (i as i64) * 2
+            ));
+        }
+        s
+    }
+
+    type IndexSnapshot = (
+        Vec<i64>,
+        Vec<(i64, Option<i64>, Option<String>, String, Option<String>)>,
+        Vec<(String, i64)>,
+    );
+
+    fn index_snapshot(conn: &Connection, path: &str) -> IndexSnapshot {
+        let (sid, totals) = conn
+            .query_row(
+                "SELECT id, message_count, total_input_tokens, total_output_tokens,
+                        cache_read_tokens, cache_creation_tokens, compaction_count,
+                        last_indexed_byte_offset, last_indexed_line_count,
+                        CAST(ROUND(estimated_cost_usd * 100) AS INTEGER)
+                 FROM cc_sessions WHERE jsonl_path = ?1",
+                params![path],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        vec![
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, i64>(2)?,
+                            r.get::<_, i64>(3)?,
+                            r.get::<_, i64>(4)?,
+                            r.get::<_, i64>(5)?,
+                            r.get::<_, i64>(6)?,
+                            r.get::<_, i64>(7)?,
+                            r.get::<_, i64>(8)?,
+                            r.get::<_, i64>(9)?,
+                        ],
+                    ))
+                },
+            )
+            .expect("session row");
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT message_index, source_line, role, kind, content_text
+                 FROM session_message_archive WHERE session_id = ?1 ORDER BY message_index",
+            )
+            .unwrap();
+        let archive = stmt
+            .query_map(params![sid], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let mut dstmt = conn
+            .prepare("SELECT day, msg_count FROM cc_session_days WHERE session_id = ?1 ORDER BY day")
+            .unwrap();
+        let days = dstmt
+            .query_map(params![sid], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        (totals, archive, days)
+    }
+
+    #[test]
+    fn incremental_index_matches_full_reindex_byte_for_byte() {
+        let dir = std::env::temp_dir().join(format!("cv_inc_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let events = synth_claude_events(40);
+        let split = events.match_indices('\n').nth(16).map(|(i, _)| i + 1).unwrap();
+
+        // (A) full index of the whole 40-event file.
+        let conn_a = memory_conn_with_project();
+        let path_a = dir.join("a.jsonl");
+        std::fs::write(&path_a, &events).unwrap();
+        parse_claude_session(&path_a, &conn_a, "project", "2026-06-12T16:03:00Z").unwrap();
+
+        // (B) index 17 events, then append the rest and index incrementally.
+        let conn_b = memory_conn_with_project();
+        let path_b = dir.join("b.jsonl");
+        std::fs::write(&path_b, &events[..split]).unwrap();
+        parse_claude_session(&path_b, &conn_b, "project", "2026-06-12T16:03:00Z").unwrap();
+        let mid: i64 = conn_b
+            .query_row(
+                "SELECT message_count FROM cc_sessions WHERE jsonl_path = ?1",
+                params![path_b.to_string_lossy().as_ref()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mid, 17, "first pass should index exactly the 17 complete lines");
+        std::fs::write(&path_b, &events).unwrap();
+        parse_claude_session(&path_b, &conn_b, "project", "2026-06-12T16:04:00Z").unwrap();
+
+        let a = index_snapshot(&conn_a, path_a.to_string_lossy().as_ref());
+        let b = index_snapshot(&conn_b, path_b.to_string_lossy().as_ref());
+        assert_eq!(a.0, b.0, "session totals/cursor/cost diverged");
+        assert_eq!(a.1, b.1, "archive rows diverged");
+        assert_eq!(a.2, b.2, "day buckets diverged");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_shrink_falls_back_to_full_reparse() {
+        let dir = std::env::temp_dir().join(format!("cv_shrink_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let events = synth_claude_events(20);
+        let conn = memory_conn_with_project();
+        let path = dir.join("s.jsonl");
+
+        std::fs::write(&path, &events).unwrap();
+        parse_claude_session(&path, &conn, "project", "2026-06-12T16:03:00Z").unwrap();
+
+        // Rotate/truncate: rewrite a shorter file. Indexer must NOT append onto
+        // stale rows — it falls back to a clean full reparse.
+        let smaller = synth_claude_events(5);
+        std::fs::write(&path, &smaller).unwrap();
+        parse_claude_session(&path, &conn, "project", "2026-06-12T16:05:00Z").unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT message_count FROM cc_sessions WHERE jsonl_path = ?1",
+                params![path.to_string_lossy().as_ref()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let arch: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_message_archive a
+                 JOIN cc_sessions s ON s.id = a.session_id WHERE s.jsonl_path = ?1",
+                params![path.to_string_lossy().as_ref()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 5, "shrunk file should reflect 5 events, not appended");
+        assert_eq!(arch, 5, "archive should be rebuilt to 5 rows");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "perf bench; run with --ignored --nocapture"]
+    fn bench_incremental_reindex_vs_full() {
+        use std::time::Instant;
+        let dir = std::env::temp_dir().join(format!("cv_incbench_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = synth_claude_events(80_000); // ~24 MB
+        let path = dir.join("big.jsonl");
+        std::fs::write(&path, &big).unwrap();
+
+        let conn = memory_conn_with_project();
+        let t0 = Instant::now();
+        parse_claude_session(&path, &conn, "project", "2026-06-12T16:03:00Z").unwrap();
+        let cold_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        // Append ~4 KB and incrementally re-index (the new per-append cost).
+        let mut grown = big.clone();
+        grown.push_str(&synth_claude_events(12));
+        std::fs::write(&path, &grown).unwrap();
+        let t1 = Instant::now();
+        parse_claude_session(&path, &conn, "project", "2026-06-12T16:04:00Z").unwrap();
+        let inc_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        // Contrast: a fresh full reparse of the same file (the OLD per-append cost).
+        let conn2 = memory_conn_with_project();
+        let t2 = Instant::now();
+        parse_claude_session(&path, &conn2, "project", "2026-06-12T16:05:00Z").unwrap();
+        let full_ms = t2.elapsed().as_secs_f64() * 1000.0;
+
+        eprintln!("\n=== incremental re-index vs full reparse (real indexer) ===");
+        eprintln!("file:                {:.1} MB", big.len() as f64 / 1_048_576.0);
+        eprintln!("cold full index:     {cold_ms:.1} ms");
+        eprintln!("full reparse:        {full_ms:.1} ms   (old behavior, every append)");
+        eprintln!("incremental append:  {inc_ms:.3} ms   (new behavior, 4 KB tail)");
+        eprintln!(
+            "speedup:             {:.0}x\n",
+            full_ms / inc_ms.max(f64::MIN_POSITIVE)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

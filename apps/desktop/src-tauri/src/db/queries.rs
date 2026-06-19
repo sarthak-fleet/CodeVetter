@@ -698,6 +698,25 @@ pub fn replace_session_message_archive(
         "DELETE FROM session_message_archive WHERE session_id = ?1",
         params![session_id],
     )?;
+    insert_archive_rows(conn, session_id, messages)
+}
+
+/// Append archive rows WITHOUT deleting existing ones. Used by the incremental
+/// indexer: callers must set `message_index` to continue past the rows already
+/// stored for this session (see `get_session_by_jsonl_path().archived_message_count`).
+pub fn append_session_message_archive(
+    conn: &Connection,
+    session_id: &str,
+    messages: &[SessionMessageArchiveInput],
+) -> Result<(), rusqlite::Error> {
+    insert_archive_rows(conn, session_id, messages)
+}
+
+fn insert_archive_rows(
+    conn: &Connection,
+    session_id: &str,
+    messages: &[SessionMessageArchiveInput],
+) -> Result<(), rusqlite::Error> {
     let now = chrono::Utc::now().to_rfc3339();
     let mut stmt = conn.prepare(
         "INSERT INTO session_message_archive (
@@ -743,6 +762,151 @@ pub fn replace_session_message_archive(
             message.source_ref.as_str(),
         ])?;
     }
+    Ok(())
+}
+
+/// (last_indexed_byte_offset, last_indexed_line_count) — how far the indexer has
+/// consumed this session's JSONL file. (0, 0) means "never incrementally indexed".
+pub fn get_session_index_cursor(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<(i64, i64), rusqlite::Error> {
+    conn.query_row(
+        "SELECT last_indexed_byte_offset, last_indexed_line_count
+         FROM cc_sessions WHERE id = ?1",
+        params![session_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}
+
+/// Record how far the indexer consumed the file (byte offset at the last newline
+/// + count of complete lines parsed so far). Set after every index of the session.
+pub fn set_session_index_cursor(
+    conn: &Connection,
+    session_id: &str,
+    byte_offset: i64,
+    line_count: i64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE cc_sessions
+         SET last_indexed_byte_offset = ?2, last_indexed_line_count = ?3
+         WHERE id = ?1",
+        params![session_id, byte_offset, line_count],
+    )?;
+    Ok(())
+}
+
+/// Additive deltas merged into an existing session row by the incremental indexer.
+/// Token/count/compaction fields are summed; identity fields use COALESCE so the
+/// existing value wins for first-seen metadata and the new value wins for "latest".
+pub struct SessionAppendDelta {
+    pub session_id: String,
+    pub add_message_count: i64,
+    pub add_input_tokens: i64,
+    pub add_output_tokens: i64,
+    pub add_cache_read_tokens: i64,
+    pub add_cache_creation_tokens: i64,
+    pub add_compaction_count: i64,
+    pub last_message: Option<String>,
+    pub first_message: Option<String>,
+    pub model_used: Option<String>,
+    pub cli_version: Option<String>,
+    pub git_branch: Option<String>,
+    pub cwd: Option<String>,
+    pub slug: Option<String>,
+    pub file_size_bytes: i64,
+    pub file_mtime: Option<String>,
+    pub indexed_at: String,
+    pub new_byte_offset: i64,
+    pub new_line_count: i64,
+}
+
+/// Apply an incremental append's deltas to the session row. Does NOT touch
+/// `estimated_cost_usd` — recompute that from the new totals (see `set_session_cost`)
+/// so a per-delta rounding never diverges from a one-shot full re-index.
+pub fn apply_session_append_delta(
+    conn: &Connection,
+    d: &SessionAppendDelta,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE cc_sessions SET
+            message_count = message_count + ?2,
+            total_input_tokens = total_input_tokens + ?3,
+            total_output_tokens = total_output_tokens + ?4,
+            cache_read_tokens = cache_read_tokens + ?5,
+            cache_creation_tokens = cache_creation_tokens + ?6,
+            compaction_count = compaction_count + ?7,
+            last_message = COALESCE(?8, last_message),
+            first_message = COALESCE(first_message, ?9),
+            model_used = COALESCE(?10, model_used),
+            cli_version = COALESCE(cli_version, ?11),
+            git_branch = COALESCE(git_branch, ?12),
+            cwd = COALESCE(cwd, ?13),
+            slug = COALESCE(slug, ?14),
+            file_size_bytes = ?15,
+            file_mtime = ?16,
+            indexed_at = ?17,
+            last_indexed_byte_offset = ?18,
+            last_indexed_line_count = ?19
+         WHERE id = ?1",
+        params![
+            d.session_id,
+            d.add_message_count,
+            d.add_input_tokens,
+            d.add_output_tokens,
+            d.add_cache_read_tokens,
+            d.add_cache_creation_tokens,
+            d.add_compaction_count,
+            d.last_message,
+            d.first_message,
+            d.model_used,
+            d.cli_version,
+            d.git_branch,
+            d.cwd,
+            d.slug,
+            d.file_size_bytes,
+            d.file_mtime,
+            d.indexed_at,
+            d.new_byte_offset,
+            d.new_line_count,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Token totals + model for a session, used to recompute `estimated_cost_usd`
+/// exactly after an incremental append. Returns (input, output, cache_read,
+/// cache_creation, model_used).
+pub fn get_session_token_totals(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<(i64, i64, i64, i64, Option<String>), rusqlite::Error> {
+    conn.query_row(
+        "SELECT total_input_tokens, total_output_tokens, cache_read_tokens,
+                cache_creation_tokens, model_used
+         FROM cc_sessions WHERE id = ?1",
+        params![session_id],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )
+}
+
+pub fn set_session_cost(
+    conn: &Connection,
+    session_id: &str,
+    cost: f64,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE cc_sessions SET estimated_cost_usd = ?2 WHERE id = ?1",
+        params![session_id, cost],
+    )?;
     Ok(())
 }
 

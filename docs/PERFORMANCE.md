@@ -54,16 +54,41 @@ incremental tail: 0.0104 ms  (4 KB only — target cost)
 waste factor:     15,619x
 ```
 
-At 211 MB the waste factor is ~50,000x. **This is the single highest-leverage
-performance fix in the app**, and it is purely algorithmic — no language change
-helps. Tracked as the incremental-parse task: add `last_indexed_byte_offset` to
-`cc_sessions`, seek from the previous offset (with a file-shrank fallback), and
-append-merge new messages into FTS without re-deriving session totals.
+At 211 MB the waste factor is ~50,000x.
 
-**Target:** per-append index cost becomes O(bytes appended), independent of file
-size. Re-run `bench:rust` after the fix — `bench_index_parse` is unchanged (cold
-index is still linear), but real-world re-index of a growing file should drop from
-hundreds of ms to sub-ms.
+### ✅ Fixed — incremental byte-offset indexer (v1.1.90)
+
+`cc_sessions` now carries `last_indexed_byte_offset` + `last_indexed_line_count`.
+When an indexed file only grows, the indexer seeks to the saved offset, parses
+just the appended tail (up to the last newline, so half-flushed events are never
+indexed), and **merges deltas** into the session — appending archive rows with
+continued `message_index`/`source_line`, bumping day buckets, summing token
+totals, and recomputing cost from the new totals. A shrunk/rotated file falls
+back to a clean full reparse. (`history.rs::index_adapter_session`.)
+
+Two guarantees, both tested:
+
+- **Correctness** — `incremental_index_matches_full_reindex_byte_for_byte` proves
+  an incremental index is byte-identical to a one-shot full re-index (totals,
+  cursor, cost, every archive row, day buckets). `file_shrink_falls_back_to_full_reparse`
+  covers rotation.
+- **Speed** — `bench_incremental_reindex_vs_full` on a 23.5 MB indexed file:
+
+  ```
+  full reparse:       1275.9 ms   (old behavior, every append)
+  incremental append:    2.114 ms (new behavior, 4 KB tail)
+  speedup:             604x
+  ```
+
+  The gap widens with file size — the old path also rewrote all ~80k archive +
+  FTS rows on every append; the new path writes only the handful that arrived.
+
+```bash
+cargo test --release bench_incremental_reindex_vs_full -- --ignored --nocapture
+```
+
+`bench_index_parse` above is unchanged — a *cold* first index is still linear
+(you must read the file once). The win is on every subsequent append.
 
 ## 2. FTS query latency
 
