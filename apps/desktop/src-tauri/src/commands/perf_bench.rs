@@ -158,7 +158,10 @@ fn bench_query() {
                 kind: "message".to_string(),
                 timestamp: Some("2026-06-19T10:00:00Z".to_string()),
                 content_text: Some(format!(
-                    "session {s} message {m} discussing performance indexing and query latency tradeoffs"
+                    "session {s} message {m} discussing performance indexing and query latency tradeoffs{}",
+                    // a selective marker in exactly 25 rows, to measure a realistic
+                    // (few-match) query against the all-match worst case below
+                    if s == 0 && m < 25 { " needlemarker" } else { "" }
                 )),
                 tool_name: None,
                 tool_call_id: None,
@@ -171,16 +174,23 @@ fn bench_query() {
     let total_rows = sessions * per_session;
 
     let iters = 200;
-    let t0 = Instant::now();
-    let mut hits = 0usize;
-    for _ in 0..iters {
-        let rows = queries::search_session_message_archive(&conn, "performance", None, None, 25)
-            .expect("search");
-        hits = rows.len();
-    }
-    let avg_ms = (t0.elapsed().as_secs_f64() * 1000.0) / iters as f64;
+    let bench_term = |term: &str| -> (f64, usize) {
+        let t0 = Instant::now();
+        let mut hits = 0usize;
+        for _ in 0..iters {
+            hits = queries::search_session_message_archive(&conn, term, None, None, 25)
+                .expect("search")
+                .len();
+        }
+        ((t0.elapsed().as_secs_f64() * 1000.0) / iters as f64, hits)
+    };
+    // Worst case: term present in every row (ranks all 20k matches).
+    let (worst_ms, worst_hits) = bench_term("performance");
+    // Realistic case: a selective term matching ~25 rows (what users actually type).
+    let (real_ms, real_hits) = bench_term("needlemarker");
 
     eprintln!("\n=== bench_query (FTS search over session_message_archive) ===");
-    eprintln!("seeded:        {total_rows} rows across {sessions} sessions in {seed_ms:.0} ms");
-    eprintln!("search avg:    {avg_ms:.3} ms/query  ({hits} rows/limit 25, {iters} iters)\n");
+    eprintln!("seeded:           {total_rows} rows across {sessions} sessions in {seed_ms:.0} ms");
+    eprintln!("worst case:       {worst_ms:.3} ms/query  (term in every row, {worst_hits} matched)");
+    eprintln!("realistic:        {real_ms:.3} ms/query  (selective term, {real_hits} matched)\n");
 }
