@@ -310,6 +310,23 @@ pub async fn trigger_index(app: AppHandle) -> Result<Value, String> {
 }
 
 /// Shared implementation for the full indexer.
+/// Whether the indexer can skip a session file without re-parsing it: it has
+/// messages and the byte cursor has consumed *exactly* the file's current size,
+/// so nothing has been appended.
+///
+/// This keys on byte offset, NOT the file mtime. The old skip compared stored
+/// vs freshly-recomputed mtime strings, but their sub-microsecond nanoseconds
+/// drift between reads of the same unchanged inode — so the skip silently failed
+/// and hundreds of large sessions were fully re-parsed (and their archive rows
+/// DELETE+re-INSERTed) on every 5-minute pass, pegging one core. Byte offset is
+/// exact: equal ⇒ nothing new; smaller ⇒ file grew (parse the tail); larger ⇒
+/// file shrank/rotated (full re-parse).
+fn session_fully_indexed(meta: &queries::SessionMeta, file_size: i64) -> bool {
+    meta.message_count > 0
+        && meta.last_indexed_byte_offset > 0
+        && meta.last_indexed_byte_offset == file_size
+}
+
 fn full_index_impl(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), String> {
     let all_bases = resolve_all_claude_projects_dirs();
     let index_started_at = chrono::Utc::now().to_rfc3339();
@@ -384,22 +401,18 @@ fn full_index_impl(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), Strin
 
                 // ── Incremental check ────────────────────────────────
                 let file_meta = std::fs::metadata(jsonl_path).ok();
-                let file_mtime_str = file_meta
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
-                    .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+                let file_size = file_meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
 
                 let existing = queries::get_session_by_jsonl_path(&conn, &jsonl_path_str)
                     .map_err(|e| e.to_string())?;
 
-                // If the file mtime is unchanged AND the session already has
-                // messages, skip it.  Sessions with 0 messages (from the quick
-                // startup index) always need a full parse.
+                // Skip when the indexer has already consumed the whole file: the
+                // cursor reached EOF (offset == current size) and the file has
+                // not grown. Byte offset is an EXACT signal — the old mtime-string
+                // check silently failed because stored vs recomputed nanoseconds
+                // drift, re-parsing 100s of MB every pass and pegging the CPU.
                 if let Some(ref meta) = existing {
-                    if meta.file_mtime.as_deref() == file_mtime_str.as_deref()
-                        && meta.message_count > 0
-                        && meta.archived_message_count > 0
-                    {
+                    if session_fully_indexed(meta, file_size) {
                         skipped_sessions += 1;
                         continue;
                     }
@@ -474,20 +487,16 @@ fn full_index_impl(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), Strin
             let jsonl_path_str = jsonl_path.to_string_lossy().to_string();
 
             // ── Incremental check ────────────────────────────
+            // Skip fully-consumed unchanged files via exact byte offset (see the
+            // Claude phase above for why mtime strings are unreliable).
             let file_meta = std::fs::metadata(jsonl_path).ok();
-            let file_mtime_str = file_meta
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+            let file_size = file_meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
 
             let existing = queries::get_session_by_jsonl_path(&conn, &jsonl_path_str)
                 .map_err(|e| e.to_string())?;
 
             if let Some(ref meta) = existing {
-                if meta.file_mtime.as_deref() == file_mtime_str.as_deref()
-                    && meta.message_count > 0
-                    && meta.archived_message_count > 0
-                {
+                if session_fully_indexed(meta, file_size) {
                     skipped_sessions += 1;
                     continue;
                 }
@@ -2799,5 +2808,121 @@ mod tests {
         );
         // Non-encoded input is returned unchanged.
         assert_eq!(percent_decode_path("plain-name"), "plain-name");
+    }
+
+    // Diagnostic (not a CI eval): runs the real indexer against a COPY of the
+    // live DB twice. Pass 2 is steady state — it must skip ~everything and be
+    // fast. Run with: cargo test --bin codevetter-desktop diag_live_index -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn diag_mtime_skip_mismatch() {
+        // For every session in the live copy, compare the STORED file_mtime with
+        // what the indexer recomputes from the file on disk. Any mismatch on an
+        // unchanged file means the mtime-skip can never fire → perpetual reparse.
+        let path = "/tmp/cv_live_copy.db";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("SKIP: {path} not present");
+            return;
+        }
+        let conn = Connection::open(path).expect("open");
+        let mut stmt = conn
+            .prepare("SELECT jsonl_path, file_mtime FROM cc_sessions WHERE jsonl_path IS NOT NULL AND file_mtime IS NOT NULL")
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        let mut checked = 0;
+        let mut mismatch = 0;
+        let mut shown = 0;
+        for (p, stored) in &rows {
+            let meta = match std::fs::metadata(p) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let recomputed = meta
+                .modified()
+                .ok()
+                .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+            checked += 1;
+            if recomputed.as_deref() != Some(stored.as_str()) {
+                mismatch += 1;
+                if shown < 8 {
+                    eprintln!("MISMATCH stored={stored:?} recomputed={recomputed:?}");
+                    shown += 1;
+                }
+            }
+        }
+        eprintln!("checked={checked} mismatch={mismatch}");
+    }
+
+    #[test]
+    #[ignore]
+    fn diag_live_index_steady_state() {
+        let path = "/tmp/cv_live_copy.db";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("SKIP: {path} not present");
+            return;
+        }
+        let conn = Connection::open(path).expect("open live copy");
+        schema::run_migrations(&conn).expect("migrate");
+
+        for pass in 1..=2 {
+            let t0 = std::time::Instant::now();
+            let s = run_full_index_summary_with_conn(&conn).expect("index pass");
+            let dt = t0.elapsed();
+            eprintln!(
+                "PASS {pass}: {:?} in {:.1}s — indexed={} skipped={} msgs={} fts_rows={}",
+                "ok",
+                dt.as_secs_f64(),
+                s.indexed_sessions,
+                s.skipped_sessions,
+                s.indexed_messages,
+                s.archive_search_rows_indexed,
+            );
+        }
+    }
+
+    #[test]
+    fn eval_skip_keys_on_byte_offset_not_mtime() {
+        // The index-skip decision must depend ONLY on byte offset vs file size —
+        // never on the file mtime string (whose nanoseconds drift between reads
+        // and silently disabled the old skip, re-parsing 100s of MB every pass).
+        let meta = |msgs: i64, offset: i64| queries::SessionMeta {
+            id: "s".to_string(),
+            // A deliberately "stale"/garbage mtime: it must not affect the result.
+            file_mtime: Some("1999-01-01T00:00:00.000000001+00:00".to_string()),
+            message_count: msgs,
+            archived_message_count: 0, // some sessions legitimately archive nothing
+            total_input_tokens: 0,
+            last_indexed_byte_offset: offset,
+        };
+
+        // Cursor at EOF → SKIP, regardless of the mismatched mtime or zero archive.
+        assert!(session_fully_indexed(&meta(5, 1000), 1000));
+        // File grew (size > offset) → must re-index the appended tail.
+        assert!(!session_fully_indexed(&meta(5, 1000), 2000));
+        // Never cursored (offset 0) → must index once.
+        assert!(!session_fully_indexed(&meta(5, 0), 0));
+        // File shrank/rotated (size < offset) → must re-parse.
+        assert!(!session_fully_indexed(&meta(5, 1000), 500));
+        // No messages yet (quick-startup stub) → must do a full parse.
+        assert!(!session_fully_indexed(&meta(0, 1000), 1000));
+    }
+
+    #[test]
+    fn eval_estimate_cost_uses_current_prices() {
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        // Opus 4.6+ is $5/$25 per 1M — NOT the old $15/$75. This guards against
+        // a stale price table inflating the headline $ (the "$49K Claude" bug).
+        assert!(near(estimate_cost("claude-opus-4-8", 1_000_000, 0, 0, 0), 5.0));
+        assert!(near(estimate_cost("claude-opus-4-8", 0, 1_000_000, 0, 0), 25.0));
+        // Cache reads bill at 0.1× input ($0.50/1M for Opus).
+        assert!(near(estimate_cost("claude-opus-4-8", 1_000_000, 0, 1_000_000, 0), 0.50));
+        // Haiku 4.5 is $1/$5 (not the old $0.25/$1.25).
+        assert!(near(estimate_cost("claude-haiku-4-5-20251001", 1_000_000, 0, 0, 0), 1.0));
+        // OpenAI o3 (codex) is $2/$8.
+        assert!(near(estimate_cost("o3", 1_000_000, 0, 0, 0), 2.0));
     }
 }

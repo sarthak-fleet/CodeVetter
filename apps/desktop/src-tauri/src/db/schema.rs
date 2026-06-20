@@ -52,6 +52,25 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         [],
     );
 
+    // v1.1.98: the same CPU bug bit ALREADY-archived sessions too. The index
+    // skip used to compare stored vs recomputed file mtime *strings*, whose
+    // sub-microsecond nanoseconds drift between reads of the very same inode —
+    // so the skip silently failed and ~800 sessions got fully re-parsed and
+    // their archive DELETE+re-INSERTed every pass (profiled to replace_archive
+    // _messages → sqlite3_step at ~95% of one core). The skip now keys on exact
+    // byte offset == file size, so give every already-indexed session a cursor
+    // at its current size. Idempotent; a grown file (size > offset) re-engages
+    // the incremental tail parser next pass.
+    let _ = conn.execute(
+        "UPDATE cc_sessions
+         SET last_indexed_byte_offset = file_size_bytes,
+             last_indexed_line_count = message_count
+         WHERE message_count > 0
+           AND last_indexed_byte_offset = 0
+           AND file_size_bytes > 0",
+        [],
+    );
+
     // T-Rex: discovery_method tags findings as 'inspection' (the default,
     // legacy LLM review pass) vs 'execution' (the sandbox runner caught it).
     let _ = conn.execute(

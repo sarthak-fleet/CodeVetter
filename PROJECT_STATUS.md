@@ -1,6 +1,6 @@
 # Project Status
 
-Last updated: 2026-06-12
+Last updated: 2026-06-21
 
 ## Current Scope
 
@@ -10,6 +10,7 @@ CodeVetter is a local-first desktop workbench for checking agent-generated code.
 
 - Desktop app and local workflow foundation are in place, with repo unpacking, review entry points, and local-first positioning documented in the README.
 - **Rust/Tauri backend cleanup (2026-06-20):** feature-gated `chromiumoxide` for optional live-browser agent work; pruned dead crates/deps; parallelized review paths for slimmer default builds when browser automation is off.
+- **Indexer CPU fix (v1.1.98, 2026-06-21):** killed the sustained ~95%-of-a-core background indexer burn. Root cause (found by profiling + replaying the indexer over a live-DB copy): subagent sidechain transcripts shared the parent's `sessionId`, collapsing onto one DB row so each was re-parsed + archive-replaced every pass; the skip also compared drift-prone nanosecond mtime strings. Fix: skip on exact byte-offset==file-size, key sidechains by unique per-file id, migrate the offset backlog, and repair the FTS sync's UUID handling. Verified: steady-state index pass 87s→1.9s. Guarded by new evals in `history.rs`/`queries.rs`.
 - Bug finding and code review are the primary implemented workflows.
 - Review replay prototypes were added for synthetic QA and intent debugging, including `/qa-replay` and `/intent-debugger` routes.
 - Risk-tiered specialist review is implemented in the CLI review path: trivial single pass, lite product/agent passes, full sensitive reviews with security/product/agent passes plus coordinator/dedupe metadata.

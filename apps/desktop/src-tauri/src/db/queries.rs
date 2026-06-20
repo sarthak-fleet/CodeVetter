@@ -353,6 +353,10 @@ pub struct SessionMeta {
     pub message_count: i64,
     pub archived_message_count: i64,
     pub total_input_tokens: i64,
+    /// Byte offset the indexer has consumed up to. When this equals the file's
+    /// current size the file is fully indexed and can be skipped — an exact,
+    /// precision-free signal (unlike mtime strings, whose nanoseconds drift).
+    pub last_indexed_byte_offset: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -382,7 +386,7 @@ pub fn get_session_by_jsonl_path(
     conn.query_row(
         "SELECT id, file_mtime, message_count,
                 (SELECT COUNT(*) FROM session_message_archive a WHERE a.session_id = cc_sessions.id),
-                total_input_tokens
+                total_input_tokens, last_indexed_byte_offset
          FROM cc_sessions
          WHERE jsonl_path = ?1",
         params![jsonl_path],
@@ -393,6 +397,7 @@ pub fn get_session_by_jsonl_path(
                 message_count: row.get(2)?,
                 archived_message_count: row.get(3)?,
                 total_input_tokens: row.get(4)?,
+                last_indexed_byte_offset: row.get(5)?,
             })
         },
     )
@@ -980,13 +985,15 @@ pub fn sync_session_message_archive_fts(conn: &Connection) -> Result<i64, rusqli
         return Ok(0);
     }
 
-    // Incremental sync. The old code DELETE'd and re-INSERT'd the ENTIRE FTS
-    // table on any count change — with 300k+ archive rows that's a multi-second
-    // CPU burn on every index pass that adds a single message (and the backfill
-    // pass re-triggered it constantly). Instead insert only rows past the FTS
-    // high-water mark (archive ids are monotonic) — O(new rows). Fall back to a
-    // full rebuild only when FTS has *more* rows than the archive (rows were
-    // deleted / a session re-indexed), so stale FTS entries get cleared.
+    // Repair sync. FTS is normally kept in step with the base table inside the
+    // same transaction (see `insert_archive_rows`), so the equal-count early
+    // return above is the steady-state path and this body almost never runs.
+    // The old code DELETE'd and re-INSERT'd the ENTIRE FTS table on any count
+    // mismatch — with 300k+ rows that's a multi-second CPU burn, and the
+    // backfill pass used to re-trigger it constantly.
+    //
+    // Only fall back to a full rebuild when FTS has *more* rows than the archive
+    // (rows were deleted / a session re-indexed), so stale FTS entries clear.
     if fts_count > archive_count {
         conn.execute("DELETE FROM session_message_archive_fts", [])?;
         return conn
@@ -1003,11 +1010,10 @@ pub fn sync_session_message_archive_fts(conn: &Connection) -> Result<i64, rusqli
             .map(|rows| rows as i64);
     }
 
-    let max_fts_id: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(archive_id), 0) FROM session_message_archive_fts",
-        [],
-        |row| row.get(0),
-    )?;
+    // Archive ids are random UUIDs (TEXT), NOT a monotonic sequence, so a numeric
+    // high-water mark is wrong — `MAX(archive_id)` read as an int errors on a real
+    // UUID, and `a.id > <int>` compares TEXT against INTEGER. Insert exactly the
+    // archive rows that are missing from FTS instead (set difference on id).
     conn.execute(
         "INSERT INTO session_message_archive_fts (
             archive_id, session_id, adapter_id, agent_type, role, kind,
@@ -1016,8 +1022,10 @@ pub fn sync_session_message_archive_fts(conn: &Connection) -> Result<i64, rusqli
          SELECT a.id, a.session_id, a.adapter_id, a.agent_type, a.role, a.kind,
                 a.content_text, a.tool_name, a.source_ref
          FROM session_message_archive a
-         WHERE a.id > ?1",
-        params![max_fts_id],
+         WHERE NOT EXISTS (
+             SELECT 1 FROM session_message_archive_fts f WHERE f.archive_id = a.id
+         )",
+        [],
     )
     .map(|rows| rows as i64)
 }
@@ -2780,5 +2788,162 @@ mod tests {
             search_session_message_archive(&conn, "checkout local", Some("codex"), None, 10)
                 .expect("search rebuilt");
         assert_eq!(rebuilt_rows.len(), 1);
+    }
+
+    // ─── Indexer-CPU regression evals ────────────────────────────────────
+    // These pin the "steady-state does no work" guarantees. The ~90% CPU bug
+    // was the indexer re-doing O(everything) work on every 5-min pass: a full
+    // FTS rebuild on any change, and re-reading sessions that yield no archive
+    // rows forever. If either guarantee regresses, these fail.
+
+    fn eval_seed_session(conn: &Connection, id: &str, msgs: i64) {
+        upsert_project(
+            conn,
+            &ProjectInput {
+                id: "eval-p".to_string(),
+                display_name: "Eval".to_string(),
+                dir_path: "/eval".to_string(),
+                session_count: None,
+                last_activity: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+        )
+        .ok();
+        upsert_session(
+            conn,
+            &SessionInput {
+                id: id.to_string(),
+                project_id: "eval-p".to_string(),
+                agent_type: Some("claude-code".to_string()),
+                jsonl_path: Some(format!("/eval/{id}.jsonl")),
+                git_branch: None,
+                cwd: None,
+                cli_version: None,
+                first_message: None,
+                last_message: Some("2026-06-20T00:00:00Z".to_string()),
+                message_count: Some(msgs),
+                total_input_tokens: Some(1000),
+                total_output_tokens: Some(100),
+                model_used: Some("claude-opus-4-8".to_string()),
+                slug: None,
+                file_size_bytes: Some(1000),
+                indexed_at: None,
+                file_mtime: Some("2026-06-20T00:00:00Z".to_string()),
+                cache_read_tokens: Some(0),
+                cache_creation_tokens: Some(0),
+                compaction_count: Some(0),
+                estimated_cost_usd: Some(0.0),
+            },
+        )
+        .expect("eval seed session");
+    }
+
+    fn eval_archive_row(idx: i64, text: &str) -> SessionMessageArchiveInput {
+        SessionMessageArchiveInput {
+            adapter_id: "claude-code".to_string(),
+            agent_type: "claude-code".to_string(),
+            source_ref: "/eval/a.jsonl".to_string(),
+            source_line: Some(idx),
+            message_index: idx,
+            role: Some("user".to_string()),
+            kind: "message".to_string(),
+            timestamp: Some("2026-06-20T00:00:00Z".to_string()),
+            content_text: Some(text.to_string()),
+            tool_name: None,
+            tool_call_id: None,
+            raw_type: Some("message".to_string()),
+        }
+    }
+
+    #[test]
+    fn eval_fts_sync_is_noop_in_steady_state_and_repairs_correctly() {
+        // FTS is mirrored at write-time, so once archived a sync must do ZERO
+        // work (the anti-CPU-loop guarantee). When FTS *does* drift, the repair
+        // must touch only the diff — and must work with TEXT/UUID archive ids
+        // (an earlier numeric high-water-mark repair errored on real UUIDs).
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::run_migrations(&conn).expect("schema");
+
+        eval_seed_session(&conn, "s1", 2);
+        replace_session_message_archive(
+            &conn,
+            "s1",
+            &[eval_archive_row(0, "alpha"), eval_archive_row(1, "beta")],
+        )
+        .expect("archive s1");
+
+        // Write-time mirroring means the table is already in sync: a sync is a
+        // pure no-op. This is the path that runs on every 5-min index pass.
+        assert_eq!(
+            sync_session_message_archive_fts(&conn).expect("steady-state sync"),
+            0,
+            "a steady-state FTS sync must do no work"
+        );
+
+        // Simulate drift: one FTS row goes missing (archive=2, fts=1). The
+        // repair must re-insert exactly the one missing row — not rebuild both,
+        // and not error on the UUID id.
+        conn.execute(
+            "DELETE FROM session_message_archive_fts
+             WHERE archive_id IN (SELECT archive_id FROM session_message_archive_fts LIMIT 1)",
+            [],
+        )
+        .expect("drop one fts row");
+        assert_eq!(
+            sync_session_message_archive_fts(&conn).expect("repair sync"),
+            1,
+            "repair must re-index exactly the missing row (UUID-id safe)"
+        );
+        assert_eq!(sync_session_message_archive_fts(&conn).expect("settled"), 0);
+
+        // Stale FTS rows (fts > archive) trigger a clean full rebuild.
+        conn.execute(
+            "INSERT INTO session_message_archive_fts
+                (archive_id, session_id, adapter_id, agent_type, role, kind,
+                 content_text, tool_name, source_ref)
+             VALUES ('stale-id','s1','claude-code','claude-code','user','message',
+                     'orphan',NULL,'/eval/a.jsonl')",
+            [],
+        )
+        .expect("inject stale fts row");
+        assert_eq!(
+            sync_session_message_archive_fts(&conn).expect("rebuild sync"),
+            2,
+            "an over-full FTS must be rebuilt to match the archive exactly"
+        );
+        assert_eq!(sync_session_message_archive_fts(&conn).expect("settled2"), 0);
+    }
+
+    #[test]
+    fn eval_backfill_never_re_reads_cursored_or_archived_sessions() {
+        // The backfill must target ONLY never-cursored, zero-archive sessions.
+        // A session the indexer has already read (cursor set) — even one that
+        // yields no archive rows — must never re-qualify, or it gets its whole
+        // JSONL re-read every pass forever.
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::run_migrations(&conn).expect("schema");
+
+        // Un-cursored + no archive → genuinely needs one backfill.
+        eval_seed_session(&conn, "fresh", 5);
+        let needy = list_sessions_needing_archive_backfill(&conn, 100).expect("list");
+        assert!(
+            needy.iter().any(|c| c.id == "fresh"),
+            "un-cursored zero-archive session should need a backfill"
+        );
+
+        // Once cursored, it must drop out even though it has no archive rows.
+        set_session_index_cursor(&conn, "fresh", 4096, 5).expect("cursor");
+        let after = list_sessions_needing_archive_backfill(&conn, 100).expect("list2");
+        assert!(
+            !after.iter().any(|c| c.id == "fresh"),
+            "a cursored session must NOT be re-read (this was the ~90% CPU bug)"
+        );
+
+        // A session that already has archive rows is excluded too.
+        eval_seed_session(&conn, "done", 2);
+        replace_session_message_archive(&conn, "done", &[eval_archive_row(0, "x")])
+            .expect("archive done");
+        let final_list = list_sessions_needing_archive_backfill(&conn, 100).expect("list3");
+        assert!(!final_list.iter().any(|c| c.id == "done"));
     }
 }
