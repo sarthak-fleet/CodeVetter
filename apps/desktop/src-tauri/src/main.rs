@@ -59,6 +59,27 @@ fn repair_path_for_gui() {
     log::info!("repair_path_for_gui: prepended {}", prefix.join(":"));
 }
 
+/// Drop the calling thread to macOS *background* QoS. The OS then schedules its
+/// work on efficiency cores and throttles it hard whenever the user is doing
+/// anything else — so the background indexer "feels like it isn't running" even
+/// while it grinds through a large catch-up. No-op off macOS.
+#[cfg(target_os = "macos")]
+fn set_thread_background_qos() {
+    extern "C" {
+        fn pthread_set_qos_class_self_np(
+            qos_class: std::os::raw::c_uint,
+            relative_priority: std::os::raw::c_int,
+        ) -> std::os::raw::c_int;
+    }
+    // QOS_CLASS_BACKGROUND = 0x09
+    unsafe {
+        pthread_set_qos_class_self_np(0x09, 0);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_thread_background_qos() {}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -97,6 +118,7 @@ fn main() {
             std::thread::Builder::new()
                 .name("initial-index".into())
                 .spawn(move || {
+                    set_thread_background_qos();
                     log::info!("Starting quick index on startup...");
                     match run_initial_index(bg_data_dir.clone()) {
                         Ok(msg) => log::info!("Quick index complete: {msg}"),
@@ -140,6 +162,7 @@ fn main() {
             std::thread::Builder::new()
                 .name("periodic-index".into())
                 .spawn(move || {
+                    set_thread_background_qos();
                     std::thread::sleep(std::time::Duration::from_secs(15));
                     loop {
                         log::info!("Periodic re-index starting...");
@@ -202,6 +225,7 @@ fn main() {
             std::thread::Builder::new()
                 .name("transcript-tail".into())
                 .spawn(move || {
+                    set_thread_background_qos();
                     std::thread::sleep(std::time::Duration::from_secs(20));
                     // Grok/Cursor aren't transcript-tailable, so they only
                     // refreshed on the 5-min full index and lagged Claude/Codex.

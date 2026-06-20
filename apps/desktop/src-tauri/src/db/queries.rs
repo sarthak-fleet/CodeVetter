@@ -1140,18 +1140,21 @@ pub fn list_sessions_needing_archive_backfill(
     limit: i64,
 ) -> Result<Vec<SessionArchiveBackfillCandidate>, rusqlite::Error> {
     let limit = limit.clamp(1, 5_000);
-    // Only sessions with NO archive rows at all need a backfill. The old
-    // criterion `archived < message_count` was unsatisfiable for many sessions
-    // (message_count counts non-archivable events like tool results), so those
-    // sessions re-qualified on every pass and got their whole JSONL re-read
-    // (read_to_string) every 5 minutes — a sustained CPU drain that also kept
-    // re-triggering the FTS sync. A session that already has any archive rows
-    // has been indexed by the current path and is as complete as it gets.
+    // Backfill only sessions the indexer has NEVER cursored (offset == 0) and
+    // that have no archive rows. Crucial: once a session has been read by the
+    // indexer (offset > 0) it has produced whatever archive rows it can — some
+    // sessions legitimately yield ZERO (no archivable content, or a malformed
+    // transcript). The old criterion (`archived < message_count`, then
+    // `NOT EXISTS archive`) kept re-qualifying those forever, re-reading their
+    // whole JSONL (read_to_string, 100s of MB) every 5 minutes and pegging the
+    // CPU + churning the FTS index. `mark_unarchivable_sessions_indexed` sets
+    // offset>0 for stuck sessions so they drop out here.
     let mut stmt = conn.prepare(
         "SELECT s.id, s.agent_type, s.jsonl_path
          FROM cc_sessions s
          WHERE s.jsonl_path IS NOT NULL
            AND s.message_count > 0
+           AND s.last_indexed_byte_offset = 0
            AND s.agent_type IN ('claude-code', 'codex')
            AND NOT EXISTS (
              SELECT 1

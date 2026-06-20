@@ -663,12 +663,24 @@ function TokenUsageChart({
   const [pinned, setPinned] = useState<number | null>(null);
   const data = mode === "daily" ? daily : weekly;
   const max = Math.max(1, ...data.map((d) => d.generated));
-  // Bar HEIGHT uses a log scale so one huge outlier day (e.g. an automated
-  // agent run generating 100s of M) doesn't flatten every normal day into an
-  // invisible sliver. Color/opacity stay on the linear ratio so the peak still
-  // reads as "hot" and normal days as "cool".
-  const logMax = Math.log10(max + 1);
-  const barFrac = (v: number) => (v <= 0 ? 0 : Math.log10(v + 1) / logMax);
+  // Linear scale, but clamped to a robust ceiling (~the busiest *normal* day)
+  // so a single outlier run doesn't flatten every other day into a sliver.
+  // Days above the ceiling clip to full height with a small cap marker. The
+  // ceiling is the ~92nd percentile of non-zero days, floored at a fraction of
+  // the true max so it's never absurdly small.
+  const sortedVals = data
+    .map((d) => d.generated)
+    .filter((v) => v > 0)
+    .sort((a, b) => a - b);
+  const axisMax = sortedVals.length
+    ? Math.max(
+        sortedVals[Math.min(sortedVals.length - 1, Math.floor(sortedVals.length * 0.92))],
+        max * 0.15,
+        1,
+      )
+    : 1;
+  const barFrac = (v: number) => Math.min(1, v / axisMax);
+  const isClipped = (v: number) => v > axisMax;
   const total = data.reduce((acc, d) => acc + d.generated, 0);
   const cacheTotal = data.reduce((acc, d) => acc + d.cache, 0);
   const n = data.length;
@@ -854,8 +866,9 @@ function TokenUsageChart({
           />
         ))}
         {data.map((d, i) => {
-          const h = barFrac(d.generated) * chartH;
-          const ratio = d.generated / max;
+          const ratio = barFrac(d.generated); // clamped 0..1 (linear, capped axis)
+          const h = ratio * chartH;
+          const clipped = isClipped(d.generated);
           const x = padX + i * barW + barW * 0.15;
           const y = padTop + chartH - h;
           const w = barW * 0.7;
@@ -893,6 +906,18 @@ function TokenUsageChart({
                 rx={1}
                 filter={isActive || (isLatest && d.generated > 0) ? "url(#bar-glow)" : undefined}
               />
+              {/* Clip marker: this day exceeds the capped axis (an outlier). */}
+              {clipped && (
+                <rect
+                  x={x}
+                  y={padTop}
+                  width={w}
+                  height={2}
+                  fill="#ffe09a"
+                  pointerEvents="none"
+                  rx={1}
+                />
+              )}
               {isPinned && (
                 <rect
                   x={x}

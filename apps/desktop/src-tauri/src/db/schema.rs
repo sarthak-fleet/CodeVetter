@@ -29,6 +29,29 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         [],
     );
 
+    // Stop the indexer pegging the CPU on "unarchivable" sessions. A handful of
+    // sessions (malformed / archive-less transcripts — e.g. a 118 MB codex log)
+    // have message_count>0 but produce ZERO archive rows and never get a byte
+    // cursor, so the full index AND the archive backfill re-read their whole
+    // JSONL (100s of MB total, via read_to_string) on EVERY pass — sustained
+    // ~90% CPU that also churns the FTS index. Mark them fully-indexed
+    // (offset = size) so the incremental path treats them as consumed and the
+    // backfill (offset=0 only) excludes them. Idempotent + cheap; if such a file
+    // later grows, file_size > offset re-engages the incremental parser.
+    let _ = conn.execute(
+        "UPDATE cc_sessions
+         SET last_indexed_byte_offset = file_size_bytes,
+             last_indexed_line_count = message_count
+         WHERE message_count > 0
+           AND last_indexed_byte_offset = 0
+           AND file_size_bytes > 0
+           AND agent_type IN ('claude-code', 'codex')
+           AND NOT EXISTS (
+             SELECT 1 FROM session_message_archive a WHERE a.session_id = cc_sessions.id
+           )",
+        [],
+    );
+
     // T-Rex: discovery_method tags findings as 'inspection' (the default,
     // legacy LLM review pass) vs 'execution' (the sandbox runner caught it).
     let _ = conn.execute(
