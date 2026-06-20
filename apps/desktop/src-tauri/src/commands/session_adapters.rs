@@ -281,6 +281,14 @@ impl SessionSourceAdapter for ClaudeCodeAdapter {
 
     fn parse_raw(&self, source_ref: &str, raw: &str) -> RawSessionAdapterSummary {
         let mut summary = empty_summary(self.adapter_id(), self.agent_type(), source_ref);
+        // Subagent/sidechain transcripts (one file per Task sub-run, under
+        // `<session>/subagents/`) carry the PARENT session's `sessionId`. Keyed
+        // by that, every sidechain of a session collapses onto one DB row whose
+        // path is the parent's — so the per-file path never matches on lookup and
+        // the indexer full-reparses + DELETE/re-INSERTs their archive on EVERY
+        // pass (profiled to ~95% of a core). Track it and key sidechains by their
+        // own path below so each indexes once and is then skipped.
+        let mut is_sidechain = false;
 
         for (idx, line) in raw.lines().enumerate() {
             let line = line.trim();
@@ -326,6 +334,13 @@ impl SessionSourceAdapter for ClaudeCodeAdapter {
                 summary.compaction_count += 1;
             }
 
+            if parsed
+                .get("isSidechain")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                is_sidechain = true;
+            }
             if summary.stable_id.is_none() {
                 summary.stable_id = value_string(Some(&parsed), "sessionId");
             }
@@ -399,6 +414,14 @@ impl SessionSourceAdapter for ClaudeCodeAdapter {
             }
 
             summary.message_count += 1;
+        }
+
+        // Sidechains: replace the parent-shared sessionId with a path-unique id so
+        // each subagent transcript is its own session row (found by path on the
+        // next pass → skipped, not re-parsed). Deterministic, so re-indexing the
+        // same file is stable.
+        if is_sidechain {
+            summary.stable_id = Some(format!("sidechain::{source_ref}"));
         }
 
         if summary.stable_id.is_none() {
