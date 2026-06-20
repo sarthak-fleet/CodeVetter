@@ -2218,39 +2218,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* Token usage chart */}
-      {tokenUsage && (
-        <div className="cv-frame overflow-hidden">
-          <div className="cv-terminal-bar h-10 px-4">
-            <BarChart3 size={14} className="text-[var(--cv-accent)]" />
-            <span className="cv-label">indexed local token burn</span>
-          </div>
-          <TokenUsageChart
-            daily={tokenUsage.daily_series}
-            weekly={tokenUsage.weekly_series}
-            agentByDay={agentByDay}
-          />
-          <WeeklyAgentSplit />
-        </div>
-      )}
-
-      {/* Activity heatmap + project/model breakdowns */}
-      {(agentByDay.length > 0 || projectUsage.length > 0 || modelUsage.length > 0) && (
-        <div className="cv-frame overflow-hidden">
-          <div className="cv-terminal-bar h-10 px-4">
-            <Activity size={14} className="text-[var(--cv-accent)]" />
-            <span className="cv-label">usage explorer · generated tokens</span>
-          </div>
-          <div className="space-y-5 p-4">
-            <UsageCalendarHeatmap data={agentByDay} />
-            <div className="grid gap-5 md:grid-cols-2">
-              <UsageByProject data={projectUsage} />
-              <UsageByModel data={modelUsage} />
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Usage — remaining per account */}
       <div className="cv-frame overflow-hidden">
         <div className="cv-terminal-bar h-10 px-4">
@@ -2352,6 +2319,39 @@ export default function Home() {
           </Card>
         )}
       </div>
+
+      {/* Token usage chart */}
+      {tokenUsage && (
+        <div className="cv-frame overflow-hidden">
+          <div className="cv-terminal-bar h-10 px-4">
+            <BarChart3 size={14} className="text-[var(--cv-accent)]" />
+            <span className="cv-label">indexed local token burn</span>
+          </div>
+          <TokenUsageChart
+            daily={tokenUsage.daily_series}
+            weekly={tokenUsage.weekly_series}
+            agentByDay={agentByDay}
+          />
+          <WeeklyAgentSplit />
+        </div>
+      )}
+
+      {/* Activity heatmap + project/model breakdowns */}
+      {(agentByDay.length > 0 || projectUsage.length > 0 || modelUsage.length > 0) && (
+        <div className="cv-frame overflow-hidden">
+          <div className="cv-terminal-bar h-10 px-4">
+            <Activity size={14} className="text-[var(--cv-accent)]" />
+            <span className="cv-label">usage explorer · generated tokens</span>
+          </div>
+          <div className="space-y-5 p-4">
+            <UsageCalendarHeatmap data={agentByDay} />
+            <div className="grid gap-5 md:grid-cols-2">
+              <UsageByProject data={projectUsage} />
+              <UsageByModel data={modelUsage} />
+            </div>
+          </div>
+        </div>
+      )}
 
       </div>
     </div>
