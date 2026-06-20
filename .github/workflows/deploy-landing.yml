@@ -85,9 +85,24 @@ jobs:
           status="${response##*HTTP_STATUS:}"
           body="${response%HTTP_STATUS:*}"
           echo "$body"
-          if [ "$status" != "200" ]; then
-            echo "::warning::Edge cache purge failed (HTTP ${status}). Add Zone.Cache Purge to CLOUDFLARE_API_TOKEN or purge manually in the dashboard."
+          if [ "$status" = "200" ]; then
+            echo "Edge cache purged for codevetter.com"
             exit 0
+          fi
+          echo "::warning::Edge cache purge failed (HTTP ${status}). Trying development mode (3h cache bypass)…"
+          dev_response="$(curl --silent --show-error --request PATCH \
+            --url "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/settings/development_mode" \
+            --header "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --write-out '\nHTTP_STATUS:%{http_code}' \
+            --data '{"value":"on"}')"
+          dev_status="${dev_response##*HTTP_STATUS:}"
+          dev_body="${dev_response%HTTP_STATUS:*}"
+          echo "$dev_body"
+          if [ "$dev_status" != "200" ]; then
+            echo "::warning::Development mode also failed (HTTP ${dev_status}). Add Zone.Cache Purge + Zone.Settings to CLOUDFLARE_API_TOKEN, or purge manually."
+          else
+            echo "Development mode enabled for 3 hours — custom domain should serve fresh HTML."
           fi
 
       - name: Smoke production landing page
