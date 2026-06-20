@@ -140,7 +140,10 @@ fn main() {
                             db::schema::purge_message_cruft_once(&conn);
                             db::schema::purge_content_text_once(&conn);
                             db::schema::purge_messages_to_buckets_once(&conn);
-                            // Refresh stored per-session $ cost if the price table changed.
+                            // Repair Codex token totals corrupted by the old
+                            // cumulative-add bug (one-time), then refresh stored
+                            // per-session $ cost if the price table changed.
+                            crate::commands::history::fix_codex_token_totals(&conn);
                             crate::commands::history::recompute_all_session_costs(&conn);
                             log::info!("Storage cleanup done.");
                         }

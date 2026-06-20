@@ -26,6 +26,13 @@ pub struct RawSessionAdapterSummary {
     pub day_counts: BTreeMap<String, i64>,
     pub archive_messages: Vec<RawSessionArchiveMessage>,
     pub parse_warnings: Vec<String>,
+    /// True when the token fields are a SESSION-CUMULATIVE total (Codex reports a
+    /// running `total_token_usage` in every `token_count` event), false when they
+    /// are per-message deltas to be summed (Claude). The incremental indexer must
+    /// SET cumulative tokens, not ADD them — adding the running total every pass
+    /// is what inflated one Codex session to 61.5B tokens / $35k.
+    #[serde(default)]
+    pub tokens_are_cumulative: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -72,6 +79,7 @@ fn empty_summary(adapter_id: &str, agent_type: &str, source_ref: &str) -> RawSes
         day_counts: BTreeMap::new(),
         archive_messages: Vec::new(),
         parse_warnings: Vec::new(),
+        tokens_are_cumulative: false,
     }
 }
 
@@ -510,6 +518,10 @@ impl SessionSourceAdapter for CodexAdapter {
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
                         has_cumulative_token_count = true;
+                        // These are running session totals (SET semantics), not
+                        // per-message deltas — the incremental indexer must not
+                        // add them on top of the prior value.
+                        summary.tokens_are_cumulative = true;
                     }
                 }
                 continue;

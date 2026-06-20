@@ -975,6 +975,97 @@ pub fn recompute_all_session_costs(conn: &rusqlite::Connection) {
     }
 }
 
+/// One-time repair of Codex token totals (v1.1.99). Codex reports SESSION-CUMULATIVE
+/// token counts in every `token_count` event; the incremental indexer used to ADD
+/// that running total on each pass, inflating some sessions ~150x — one reached
+/// 61.5B input tokens / $35k versus a true 391M / ~$220. The indexer now SETs
+/// cumulative tokens (see `tokens_absolute`), but rows already stored are still
+/// wrong. Re-read each Codex file, take the correct final cumulative from the
+/// adapter, and overwrite ONLY the token columns + cost — the archive/message
+/// counts were never corrupted, so this skips re-archiving and is far cheaper than
+/// a full re-index. Gated by a preference so it runs exactly once.
+pub fn fix_codex_token_totals(conn: &rusqlite::Connection) {
+    if let Ok(Some(rev)) = queries::get_preference(conn, "codex_token_fix_rev") {
+        if rev == "1" {
+            return;
+        }
+    }
+    let rows: Vec<(String, String, Option<String>)> = {
+        let mut stmt = match conn.prepare(
+            "SELECT id, jsonl_path, model_used FROM cc_sessions
+             WHERE agent_type = 'codex' AND jsonl_path IS NOT NULL",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("codex token fix prepare failed: {e}");
+                return;
+            }
+        };
+        let mapped = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        });
+        match mapped {
+            Ok(m) => m.filter_map(Result::ok).collect(),
+            Err(e) => {
+                log::warn!("codex token fix query failed: {e}");
+                return;
+            }
+        }
+    };
+
+    let tx = match conn.unchecked_transaction() {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let mut fixed = 0u64;
+    for (id, path, stored_model) in rows {
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let summary = CodexAdapter.parse_raw(&path, &raw);
+        // Only overwrite when we actually parsed a cumulative token_count; a
+        // truncated/odd file shouldn't zero a possibly-valid stored value.
+        if !summary.tokens_are_cumulative {
+            continue;
+        }
+        let model = summary.model_used.or(stored_model);
+        let cost = estimate_cost(
+            model.as_deref().unwrap_or(""),
+            summary.total_input_tokens,
+            summary.total_output_tokens,
+            summary.cache_read_tokens,
+            summary.cache_creation_tokens,
+        );
+        let _ = tx.execute(
+            "UPDATE cc_sessions SET
+                total_input_tokens = ?2,
+                total_output_tokens = ?3,
+                cache_read_tokens = ?4,
+                cache_creation_tokens = ?5,
+                estimated_cost_usd = ?6
+             WHERE id = ?1",
+            rusqlite::params![
+                id,
+                summary.total_input_tokens,
+                summary.total_output_tokens,
+                summary.cache_read_tokens,
+                summary.cache_creation_tokens,
+                cost,
+            ],
+        );
+        fixed += 1;
+    }
+    if tx.commit().is_ok() {
+        let _ = queries::set_preference(conn, "codex_token_fix_rev", "1");
+        log::info!("Fixed Codex cumulative token totals for {fixed} sessions");
+    }
+}
+
 fn upsert_adapter_summary_session(
     conn: &rusqlite::Connection,
     project_id: &str,
@@ -1254,6 +1345,10 @@ fn index_session_incremental<A: SessionSourceAdapter>(
             add_cache_read_tokens: summary.cache_read_tokens,
             add_cache_creation_tokens: summary.cache_creation_tokens,
             add_compaction_count: summary.compaction_count,
+            // Codex reports session-cumulative token totals, so SET rather than
+            // add them on each incremental pass (otherwise they compound to
+            // billions). Claude reports per-message deltas → add.
+            tokens_absolute: summary.tokens_are_cumulative,
             last_message: summary.last_timestamp.clone(),
             first_message: summary.first_timestamp.clone(),
             model_used: summary.model_used.clone(),
@@ -1303,6 +1398,7 @@ fn zero_delta(
         add_cache_read_tokens: 0,
         add_cache_creation_tokens: 0,
         add_compaction_count: 0,
+        tokens_absolute: false,
         last_message: None,
         first_message: None,
         model_used: None,
@@ -1619,6 +1715,8 @@ fn parse_grok_session_dir(
         day_counts,
         archive_messages: Vec::new(),
         parse_warnings: Vec::new(),
+        // Grok token counts are summed per-turn estimates, not a running total.
+        tokens_are_cumulative: false,
     })
 }
 
@@ -1909,6 +2007,7 @@ fn index_cursor_agent_sessions(conn: &rusqlite::Connection) -> Result<(u64, u64,
                 day_counts,
                 archive_messages: Vec::new(),
                 parse_warnings: Vec::new(),
+                tokens_are_cumulative: false,
             };
 
             match upsert_adapter_summary_session(
@@ -2813,6 +2912,32 @@ mod tests {
     // Diagnostic (not a CI eval): runs the real indexer against a COPY of the
     // live DB twice. Pass 2 is steady state — it must skip ~everything and be
     // fast. Run with: cargo test --bin codevetter-desktop diag_live_index -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn diag_codex_fix_cost() {
+        // Runs the Codex token repair against a copy of the live DB and reports
+        // before/after totals. Run with:
+        // cargo test --bin codevetter-desktop diag_codex_fix_cost -- --ignored --nocapture
+        let path = "/tmp/cv_live_copy.db";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("SKIP: {path} not present");
+            return;
+        }
+        let conn = Connection::open(path).expect("open");
+        let total = |c: &Connection| -> f64 {
+            c.query_row("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM cc_sessions", [], |r| r.get(0)).unwrap_or(0.0)
+        };
+        let codex = |c: &Connection| -> f64 {
+            c.query_row("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM cc_sessions WHERE agent_type='codex'", [], |r| r.get(0)).unwrap_or(0.0)
+        };
+        eprintln!("BEFORE: total=${:.0} codex=${:.0}", total(&conn), codex(&conn));
+        fix_codex_token_totals(&conn);
+        eprintln!("AFTER:  total=${:.0} codex=${:.0}", total(&conn), codex(&conn));
+        let mut stmt = conn.prepare("SELECT agent_type, ROUND(estimated_cost_usd,2), total_input_tokens FROM cc_sessions ORDER BY estimated_cost_usd DESC LIMIT 5").unwrap();
+        let rows: Vec<(String,f64,i64)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().filter_map(Result::ok).collect();
+        for (a,c,t) in rows { eprintln!("  top: {a} ${c} ({t} input tok)"); }
+    }
+
     #[test]
     #[ignore]
     fn diag_mtime_skip_mismatch() {

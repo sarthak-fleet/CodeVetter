@@ -868,6 +868,11 @@ pub struct SessionAppendDelta {
     pub add_cache_read_tokens: i64,
     pub add_cache_creation_tokens: i64,
     pub add_compaction_count: i64,
+    /// When true the token fields are SET to these values (session-cumulative,
+    /// e.g. Codex's running `total_token_usage`) instead of added. Without this,
+    /// the incremental indexer re-adds the running total every pass and tokens
+    /// explode (one Codex session reached 61.5B tokens / $35k).
+    pub tokens_absolute: bool,
     pub last_message: Option<String>,
     pub first_message: Option<String>,
     pub model_used: Option<String>,
@@ -889,13 +894,17 @@ pub fn apply_session_append_delta(
     conn: &Connection,
     d: &SessionAppendDelta,
 ) -> Result<(), rusqlite::Error> {
+    // ?20 = tokens_absolute. When set, the token columns are replaced by the
+    // supplied values (Codex's session-cumulative totals); otherwise they are
+    // summed (Claude's per-message deltas). message_count always sums — the
+    // parse only ever sees the newly-appended messages.
     conn.execute(
         "UPDATE cc_sessions SET
             message_count = message_count + ?2,
-            total_input_tokens = total_input_tokens + ?3,
-            total_output_tokens = total_output_tokens + ?4,
-            cache_read_tokens = cache_read_tokens + ?5,
-            cache_creation_tokens = cache_creation_tokens + ?6,
+            total_input_tokens = CASE WHEN ?20 THEN ?3 ELSE total_input_tokens + ?3 END,
+            total_output_tokens = CASE WHEN ?20 THEN ?4 ELSE total_output_tokens + ?4 END,
+            cache_read_tokens = CASE WHEN ?20 THEN ?5 ELSE cache_read_tokens + ?5 END,
+            cache_creation_tokens = CASE WHEN ?20 THEN ?6 ELSE cache_creation_tokens + ?6 END,
             compaction_count = compaction_count + ?7,
             last_message = COALESCE(?8, last_message),
             first_message = COALESCE(first_message, ?9),
@@ -930,6 +939,7 @@ pub fn apply_session_append_delta(
             d.indexed_at,
             d.new_byte_offset,
             d.new_line_count,
+            d.tokens_absolute,
         ],
     )?;
     Ok(())
@@ -2912,6 +2922,59 @@ mod tests {
             "an over-full FTS must be rebuilt to match the archive exactly"
         );
         assert_eq!(sync_session_message_archive_fts(&conn).expect("settled2"), 0);
+    }
+
+    #[test]
+    fn eval_append_delta_sets_cumulative_tokens_but_adds_per_message() {
+        // Codex reports SESSION-CUMULATIVE token totals; the incremental indexer
+        // must SET them (tokens_absolute=true), not add — adding a running total
+        // every pass inflated one session to 61.5B tokens / $35k. Claude reports
+        // per-message deltas → add.
+        let conn = Connection::open_in_memory().expect("memory db");
+        schema::run_migrations(&conn).expect("schema");
+        eval_seed_session(&conn, "s1", 5); // seeds total_input_tokens = 1000
+
+        let mk = |add: i64, absolute: bool| SessionAppendDelta {
+            session_id: "s1".to_string(),
+            add_message_count: 0,
+            add_input_tokens: add,
+            add_output_tokens: 0,
+            add_cache_read_tokens: 0,
+            add_cache_creation_tokens: 0,
+            add_compaction_count: 0,
+            tokens_absolute: absolute,
+            last_message: None,
+            first_message: None,
+            model_used: None,
+            cli_version: None,
+            git_branch: None,
+            cwd: None,
+            slug: None,
+            file_size_bytes: 1000,
+            file_mtime: None,
+            indexed_at: "2026-06-21T00:00:00Z".to_string(),
+            new_byte_offset: 1000,
+            new_line_count: 5,
+        };
+        let input = |c: &Connection| -> i64 {
+            c.query_row(
+                "SELECT total_input_tokens FROM cc_sessions WHERE id='s1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        // Per-message (Claude): adds on top of the seeded 1000.
+        apply_session_append_delta(&conn, &mk(500, false)).expect("add");
+        assert_eq!(input(&conn), 1500);
+        // Cumulative (Codex): SETS to the running total — does not pile on.
+        apply_session_append_delta(&conn, &mk(2000, true)).expect("set");
+        assert_eq!(
+            input(&conn),
+            2000,
+            "cumulative tokens must be SET to the running total, not added"
+        );
     }
 
     #[test]
