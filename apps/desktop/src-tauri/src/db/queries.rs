@@ -1787,6 +1787,8 @@ pub struct DayBucket {
     pub generated: i64,
     /// Cache-read tokens attributed to this day (re-sent context).
     pub cache: i64,
+    /// API-equivalent USD cost attributed to this day (all token types priced).
+    pub cost: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1795,6 +1797,7 @@ pub struct WeekBucket {
     pub tokens: i64,
     pub generated: i64,
     pub cache: i64,
+    pub cost: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1803,11 +1806,16 @@ pub struct TokenUsageStats {
     pub this_week: i64,
     pub this_month: i64,
     pub this_year: i64,
-    /// Cache-free generated-token period totals (the headline metric).
+    /// Cache-free generated-token period totals.
     pub today_generated: i64,
     pub week_generated: i64,
     pub month_generated: i64,
     pub year_generated: i64,
+    /// API-equivalent USD cost per period (the headline metric).
+    pub today_cost: f64,
+    pub week_cost: f64,
+    pub month_cost: f64,
+    pub year_cost: f64,
     pub daily_series: Vec<DayBucket>,
     pub weekly_series: Vec<WeekBucket>,
 }
@@ -1825,6 +1833,8 @@ pub struct AgentUsageRow {
     pub output_tokens: i64,
     pub week_real_input_tokens: i64,
     pub week_output_tokens: i64,
+    /// All-time API-equivalent USD cost for this agent (all token types priced).
+    pub cost: f64,
 }
 
 pub fn get_agent_usage_breakdown(
@@ -1845,7 +1855,8 @@ pub fn get_agent_usage_breakdown(
                 COALESCE(SUM(CASE WHEN last_message >= ?1
                     THEN MAX(total_input_tokens - cache_read_tokens, 0) ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN last_message >= ?1
-                    THEN total_output_tokens ELSE 0 END), 0)
+                    THEN total_output_tokens ELSE 0 END), 0),
+                COALESCE(SUM(estimated_cost_usd), 0.0)
          FROM cc_sessions
          GROUP BY agent_type
          ORDER BY 3 DESC",
@@ -1861,6 +1872,7 @@ pub fn get_agent_usage_breakdown(
                 output_tokens: r.get(4)?,
                 week_real_input_tokens: r.get(5)?,
                 week_output_tokens: r.get(6)?,
+                cost: r.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1910,7 +1922,10 @@ pub fn get_token_usage_stats(conn: &Connection) -> Result<TokenUsageStats, rusql
                 ) AS generated,
                 SUM(
                     COALESCE(s.cache_read_tokens, 0) * d.msg_count * 1.0 / t.total_n
-                ) AS cache
+                ) AS cache,
+                SUM(
+                    COALESCE(s.estimated_cost_usd, 0.0) * d.msg_count * 1.0 / t.total_n
+                ) AS cost
          FROM cc_session_days d
          JOIN session_total t ON t.session_id = d.session_id
          JOIN cc_sessions s ON s.id = d.session_id
@@ -1918,12 +1933,17 @@ pub fn get_token_usage_stats(conn: &Connection) -> Result<TokenUsageStats, rusql
          GROUP BY d.day",
     )?;
 
-    // day -> (tokens, generated, cache)
-    let day_map: std::collections::HashMap<String, (f64, f64, f64)> = stmt
+    // day -> (tokens, generated, cache, cost)
+    let day_map: std::collections::HashMap<String, (f64, f64, f64, f64)> = stmt
         .query_map(params![year_str], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                (r.get::<_, f64>(1)?, r.get::<_, f64>(2)?, r.get::<_, f64>(3)?),
+                (
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, f64>(3)?,
+                    r.get::<_, f64>(4)?,
+                ),
             ))
         })?
         .collect::<Result<_, _>>()?;
@@ -1932,14 +1952,22 @@ pub fn get_token_usage_stats(conn: &Connection) -> Result<TokenUsageStats, rusql
     let monday_str = monday.format("%Y-%m-%d").to_string();
     let month_str = month_start.format("%Y-%m-%d").to_string();
 
-    // Sum a field of the (tokens, generated, cache) tuple over days >= `since`.
-    let sum_since = |since: &str, pick: fn(&(f64, f64, f64)) -> f64| -> i64 {
+    // Sum a tuple field (rounded to int) over days >= `since`.
+    let sum_since = |since: &str, pick: fn(&(f64, f64, f64, f64)) -> f64| -> i64 {
         day_map
             .iter()
             .filter(|(d, _)| d.as_str() >= since)
             .map(|(_, v)| pick(v))
             .sum::<f64>()
             .round() as i64
+    };
+    // Sum the cost field (kept as f64 dollars) over days >= `since`.
+    let cost_since = |since: &str| -> f64 {
+        day_map
+            .iter()
+            .filter(|(d, _)| d.as_str() >= since)
+            .map(|(_, v)| v.3)
+            .sum::<f64>()
     };
     let today_sum = day_map
         .get(&today_str)
@@ -1951,12 +1979,16 @@ pub fn get_token_usage_stats(conn: &Connection) -> Result<TokenUsageStats, rusql
         .map(|v| v.1)
         .unwrap_or(0.0)
         .round() as i64;
+    let today_cost = day_map.get(&today_str).map(|v| v.3).unwrap_or(0.0);
     let week_sum = sum_since(&monday_str, |v| v.0);
     let week_generated = sum_since(&monday_str, |v| v.1);
+    let week_cost = cost_since(&monday_str);
     let month_sum = sum_since(&month_str, |v| v.0);
     let month_generated = sum_since(&month_str, |v| v.1);
+    let month_cost = cost_since(&month_str);
     let year_sum = day_map.values().map(|v| v.0).sum::<f64>().round() as i64;
     let year_generated = day_map.values().map(|v| v.1).sum::<f64>().round() as i64;
+    let year_cost = day_map.values().map(|v| v.3).sum::<f64>();
 
     // Daily series: last 30 days from the day_map (zero-filled).
     let mut daily_series = Vec::with_capacity(30);
@@ -1964,15 +1996,16 @@ pub fn get_token_usage_stats(conn: &Connection) -> Result<TokenUsageStats, rusql
         let d = (today - Duration::days(29 - i))
             .format("%Y-%m-%d")
             .to_string();
-        let (tokens, generated, cache) = day_map
+        let (tokens, generated, cache, cost) = day_map
             .get(&d)
-            .map(|v| (v.0.round() as i64, v.1.round() as i64, v.2.round() as i64))
-            .unwrap_or((0, 0, 0));
+            .map(|v| (v.0.round() as i64, v.1.round() as i64, v.2.round() as i64, v.3))
+            .unwrap_or((0, 0, 0, 0.0));
         daily_series.push(DayBucket {
             date: d,
             tokens,
             generated,
             cache,
+            cost,
         });
     }
 
@@ -1997,20 +2030,24 @@ pub fn get_token_usage_stats(conn: &Connection) -> Result<TokenUsageStats, rusql
                 ) AS gen,
                 SUM(
                     COALESCE(s.cache_read_tokens, 0) * d.msg_count * 1.0 / t.total_n
-                ) AS cache
+                ) AS cache,
+                SUM(
+                    COALESCE(s.estimated_cost_usd, 0.0) * d.msg_count * 1.0 / t.total_n
+                ) AS cost
          FROM cc_session_days d
          JOIN session_total t ON t.session_id = d.session_id
          JOIN cc_sessions s ON s.id = d.session_id
          WHERE d.day >= ?1
          GROUP BY d.day",
     )?;
-    let day_rows: Vec<(String, f64, f64, f64)> = stmt2
+    let day_rows: Vec<(String, f64, f64, f64, f64)> = stmt2
         .query_map(params![twelve_str], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, f64>(1)?,
                 r.get::<_, f64>(2)?,
                 r.get::<_, f64>(3)?,
+                r.get::<_, f64>(4)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
@@ -2025,26 +2062,32 @@ pub fn get_token_usage_stats(conn: &Connection) -> Result<TokenUsageStats, rusql
         let tokens = day_rows
             .iter()
             .filter(|(d, ..)| in_week(d))
-            .map(|(_, t, _, _)| *t)
+            .map(|(_, t, ..)| *t)
             .sum::<f64>()
             .round() as i64;
         let generated = day_rows
             .iter()
             .filter(|(d, ..)| in_week(d))
-            .map(|(_, _, g, _)| *g)
+            .map(|(_, _, g, ..)| *g)
             .sum::<f64>()
             .round() as i64;
         let cache = day_rows
             .iter()
             .filter(|(d, ..)| in_week(d))
-            .map(|(_, _, _, c)| *c)
+            .map(|(_, _, _, c, ..)| *c)
             .sum::<f64>()
             .round() as i64;
+        let cost = day_rows
+            .iter()
+            .filter(|(d, ..)| in_week(d))
+            .map(|(_, _, _, _, c)| *c)
+            .sum::<f64>();
         weekly_series.push(WeekBucket {
             week_start: ws_s,
             tokens,
             generated,
             cache,
+            cost,
         });
     }
 
@@ -2057,6 +2100,10 @@ pub fn get_token_usage_stats(conn: &Connection) -> Result<TokenUsageStats, rusql
         week_generated,
         month_generated,
         year_generated,
+        today_cost,
+        week_cost,
+        month_cost,
+        year_cost,
         daily_series,
         weekly_series,
     })
@@ -2073,6 +2120,8 @@ pub struct AgentDayUsage {
     /// Cache-free generated tokens (real_input + output) for that agent that day.
     pub generated: i64,
     pub cache: i64,
+    /// API-equivalent USD cost for that agent that day.
+    pub cost: f64,
 }
 
 /// Per-day, per-agent generated/cache tokens for the last `days` days. Each
@@ -2100,7 +2149,10 @@ pub fn get_agent_usage_by_day(
                 ) AS generated,
                 SUM(
                     COALESCE(s.cache_read_tokens, 0) * d.msg_count * 1.0 / t.total_n
-                ) AS cache
+                ) AS cache,
+                SUM(
+                    COALESCE(s.estimated_cost_usd, 0.0) * d.msg_count * 1.0 / t.total_n
+                ) AS cost
          FROM cc_session_days d
          JOIN session_total t ON t.session_id = d.session_id
          JOIN cc_sessions s ON s.id = d.session_id
@@ -2116,6 +2168,7 @@ pub fn get_agent_usage_by_day(
                 agent_type: r.get(1)?,
                 generated: r.get::<_, f64>(2)?.round() as i64,
                 cache: r.get::<_, f64>(3)?.round() as i64,
+                cost: r.get::<_, f64>(4)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2130,9 +2183,10 @@ pub struct ProjectUsage {
     pub sessions: i64,
     pub generated: i64,
     pub cache: i64,
+    pub cost: f64,
 }
 
-/// All-time generated/cache tokens grouped by project, top `limit` by generated.
+/// All-time generated/cache tokens + USD cost grouped by project, top `limit` by cost.
 pub fn get_usage_by_project(
     conn: &Connection,
     limit: i64,
@@ -2142,12 +2196,13 @@ pub fn get_usage_by_project(
                 COUNT(s.id),
                 COALESCE(SUM(MAX(COALESCE(s.total_input_tokens,0) - COALESCE(s.cache_read_tokens,0), 0)
                          + COALESCE(s.total_output_tokens,0)), 0) AS generated,
-                COALESCE(SUM(COALESCE(s.cache_read_tokens,0)), 0) AS cache
+                COALESCE(SUM(COALESCE(s.cache_read_tokens,0)), 0) AS cache,
+                COALESCE(SUM(COALESCE(s.estimated_cost_usd,0.0)), 0.0) AS cost
          FROM cc_sessions s
          JOIN cc_projects p ON p.id = s.project_id
          GROUP BY p.id
          HAVING generated > 0
-         ORDER BY generated DESC
+         ORDER BY cost DESC
          LIMIT ?1",
     )?;
     let rows = stmt
@@ -2159,6 +2214,7 @@ pub fn get_usage_by_project(
                 sessions: r.get(3)?,
                 generated: r.get(4)?,
                 cache: r.get(5)?,
+                cost: r.get(6)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2171,20 +2227,22 @@ pub struct ModelUsage {
     pub sessions: i64,
     pub generated: i64,
     pub cache: i64,
+    pub cost: f64,
 }
 
-/// All-time generated/cache tokens grouped by model_used, ordered by generated.
+/// All-time generated/cache tokens + USD cost grouped by model_used, by cost desc.
 pub fn get_usage_by_model(conn: &Connection) -> Result<Vec<ModelUsage>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT COALESCE(NULLIF(model_used, ''), 'unknown') AS model,
                 COUNT(*),
                 COALESCE(SUM(MAX(COALESCE(total_input_tokens,0) - COALESCE(cache_read_tokens,0), 0)
                          + COALESCE(total_output_tokens,0)), 0) AS generated,
-                COALESCE(SUM(COALESCE(cache_read_tokens,0)), 0) AS cache
+                COALESCE(SUM(COALESCE(cache_read_tokens,0)), 0) AS cache,
+                COALESCE(SUM(COALESCE(estimated_cost_usd,0.0)), 0.0) AS cost
          FROM cc_sessions
          GROUP BY model
          HAVING generated > 0
-         ORDER BY generated DESC",
+         ORDER BY cost DESC",
     )?;
     let rows = stmt
         .query_map([], |r| {
@@ -2193,6 +2251,7 @@ pub fn get_usage_by_model(conn: &Connection) -> Result<Vec<ModelUsage>, rusqlite
                 sessions: r.get(1)?,
                 generated: r.get(2)?,
                 cache: r.get(3)?,
+                cost: r.get(4)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;

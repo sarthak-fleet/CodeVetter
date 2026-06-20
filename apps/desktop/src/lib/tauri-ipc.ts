@@ -283,10 +283,12 @@ export interface DayBucket {
   date: string;
   /** Cache-inclusive total (real_input + cache_read + output). */
   tokens: number;
-  /** Cache-free generated tokens (real_input + output) — the headline metric. */
+  /** Cache-free generated tokens (real_input + output). */
   generated: number;
   /** Cache-read tokens attributed to this day. */
   cache: number;
+  /** API-equivalent USD cost attributed to this day (the headline metric). */
+  cost: number;
 }
 
 export interface WeekBucket {
@@ -294,6 +296,7 @@ export interface WeekBucket {
   tokens: number;
   generated: number;
   cache: number;
+  cost: number;
 }
 
 export interface TokenUsageStats {
@@ -305,19 +308,25 @@ export interface TokenUsageStats {
   week_generated: number;
   month_generated: number;
   year_generated: number;
+  /** API-equivalent USD cost per period (the headline metric). */
+  today_cost: number;
+  week_cost: number;
+  month_cost: number;
+  year_cost: number;
   daily_series: DayBucket[];
   weekly_series: WeekBucket[];
 }
 
-/** Per-day, per-agent generated/cache tokens (day-wise drill-down). */
+/** Per-day, per-agent generated/cache tokens + USD cost (day-wise drill-down). */
 export interface AgentDayUsage {
   date: string;
   agent_type: string;
   generated: number;
   cache: number;
+  cost: number;
 }
 
-/** All-time generated/cache tokens grouped by project. */
+/** All-time generated/cache tokens + USD cost grouped by project. */
 export interface ProjectUsage {
   project_id: string;
   display_name: string;
@@ -325,17 +334,19 @@ export interface ProjectUsage {
   sessions: number;
   generated: number;
   cache: number;
+  cost: number;
 }
 
-/** All-time generated/cache tokens grouped by model. */
+/** All-time generated/cache tokens + USD cost grouped by model. */
 export interface ModelUsage {
   model: string;
   sessions: number;
   generated: number;
   cache: number;
+  cost: number;
 }
 
-/** Per-agent usage split into real compute vs cache reads. */
+/** Per-agent usage split into real compute vs cache reads, with USD cost. */
 export interface AgentUsageRow {
   agent_type: string;
   sessions: number;
@@ -344,6 +355,8 @@ export interface AgentUsageRow {
   output_tokens: number;
   week_real_input_tokens: number;
   week_output_tokens: number;
+  /** All-time API-equivalent USD cost for this agent. */
+  cost: number;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1296,14 +1309,6 @@ export async function getToolBreakdown(
 
 export async function getPricingTable(): Promise<PricingRow[]> {
   return safeInvoke<PricingRow[]>("get_pricing_table");
-}
-
-export async function setTrayText(text: string): Promise<void> {
-  return safeInvoke<void>("set_tray_text", { text });
-}
-
-export async function setTrayMenu(lines: string[]): Promise<void> {
-  return safeInvoke<void>("set_tray_menu", { lines });
 }
 
 export async function sendTrayNotification(

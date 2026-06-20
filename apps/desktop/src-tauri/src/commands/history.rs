@@ -867,15 +867,22 @@ fn estimate_cost(
     cache_read: i64,
     cache_creation: i64,
 ) -> f64 {
-    // Per-million-token pricing (approximate as of early 2026)
+    // Per-million-token pricing (input, output, cache-read, cache-write), USD.
+    // Cache-read ≈ 0.1× input, cache-write (5-min) ≈ 1.25× input. Bump
+    // PRICING_REV in recompute_all_session_costs whenever these change so the
+    // stored estimated_cost_usd is refreshed for already-indexed sessions.
     let (input_price, output_price, cache_read_price, cache_write_price) = match model {
-        m if m.contains("opus") => (15.0, 75.0, 1.5, 18.75),
-        m if m.contains("sonnet") => (3.0, 15.0, 0.3, 3.75),
-        m if m.contains("haiku") => (0.25, 1.25, 0.025, 0.3),
+        // Claude Opus 4.6+ dropped to $5/$25 (older Opus was $15/$75).
+        m if m.contains("opus") => (5.0, 25.0, 0.50, 6.25),
+        m if m.contains("sonnet") => (3.0, 15.0, 0.30, 3.75),
+        // Haiku 4.5 is $1/$5 (older Haiku 3.5 was $0.25/$1.25).
+        m if m.contains("haiku") => (1.0, 5.0, 0.10, 1.25),
         m if m.contains("gpt-4o") => (2.5, 10.0, 1.25, 2.5),
         m if m.contains("gpt-4.1") => (2.0, 8.0, 0.5, 2.0),
-        m if m.contains("o3") || m.contains("o4-mini") => (1.1, 4.4, 0.275, 1.1),
-        _ => (3.0, 15.0, 0.3, 3.75), // default to sonnet pricing
+        // OpenAI o3 repriced to $2/$8 (cached input $0.50).
+        m if m.contains("o3") || m.contains("o4-mini") => (2.0, 8.0, 0.50, 2.0),
+        m if m.contains("grok") => (3.0, 15.0, 0.75, 3.75),
+        _ => (3.0, 15.0, 0.30, 3.75), // default ≈ sonnet pricing
     };
 
     // total_input already includes cache_read + cache_creation tokens (added
@@ -889,6 +896,74 @@ fn estimate_cost(
         + cache_creation as f64 * cache_write_price)
         / 1_000_000.0;
     (cost * 100.0).round() / 100.0 // round to cents
+}
+
+/// Bump this whenever the `estimate_cost` price table changes so already-indexed
+/// sessions get their stored `estimated_cost_usd` refreshed (otherwise mtime-skip
+/// keeps the old cost). Rev 2 = Opus $5/$25 + Haiku 4.5 $1/$5 + o3 $2/$8.
+const PRICING_REV: &str = "2";
+
+/// Recompute `estimated_cost_usd` for every session from its stored token counts
+/// and model, using the current price table — a pure DB pass, no file re-read.
+/// Runs once per `PRICING_REV` (gated by a preference) so a price change is
+/// reflected immediately without forcing a full re-index.
+pub fn recompute_all_session_costs(conn: &rusqlite::Connection) {
+    if let Ok(Some(rev)) = queries::get_preference(conn, "pricing_rev") {
+        if rev == PRICING_REV {
+            return;
+        }
+    }
+    let mut stmt = match conn.prepare(
+        "SELECT id, model_used, total_input_tokens, total_output_tokens,
+                cache_read_tokens, cache_creation_tokens
+         FROM cc_sessions",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("cost recompute prepare failed: {e}");
+            return;
+        }
+    };
+    let mapped = match stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, i64>(5)?,
+        ))
+    }) {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("cost recompute query failed: {e}");
+            return;
+        }
+    };
+    let rows: Vec<(String, Option<String>, i64, i64, i64, i64)> =
+        mapped.filter_map(Result::ok).collect();
+    drop(stmt);
+    let tx = match conn.unchecked_transaction() {
+        Ok(tx) => tx,
+        Err(_) => return,
+    };
+    for (id, model, total_input, output, cache_read, cache_creation) in rows {
+        let cost = estimate_cost(
+            model.as_deref().unwrap_or(""),
+            total_input,
+            output,
+            cache_read,
+            cache_creation,
+        );
+        let _ = tx.execute(
+            "UPDATE cc_sessions SET estimated_cost_usd = ?2 WHERE id = ?1",
+            rusqlite::params![id, cost],
+        );
+    }
+    if tx.commit().is_ok() {
+        let _ = queries::set_preference(conn, "pricing_rev", PRICING_REV);
+        log::info!("Recomputed session costs for pricing rev {PRICING_REV}");
+    }
 }
 
 fn upsert_adapter_summary_session(

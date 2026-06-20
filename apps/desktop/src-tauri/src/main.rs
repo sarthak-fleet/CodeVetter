@@ -7,8 +7,6 @@ mod db;
 mod talk;
 
 use std::sync::{Arc, Mutex};
-use tauri::menu::{MenuBuilder, MenuItemBuilder};
-use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
 /// Shared database state accessible from every Tauri command via
@@ -142,6 +140,8 @@ fn main() {
                             db::schema::purge_message_cruft_once(&conn);
                             db::schema::purge_content_text_once(&conn);
                             db::schema::purge_messages_to_buckets_once(&conn);
+                            // Refresh stored per-session $ cost if the price table changed.
+                            crate::commands::history::recompute_all_session_costs(&conn);
                             log::info!("Storage cleanup done.");
                         }
                         Err(e) => log::error!("Storage cleanup DB init failed: {e}"),
@@ -182,21 +182,6 @@ fn main() {
                                         );
                                     }
                                     Err(e) => log::error!("Periodic re-index failed: {e}"),
-                                }
-
-                                // After each index pass, refresh the menu-bar
-                                // tray title with today's tokens. Decoupled
-                                // from the UI so it updates even when the app
-                                // window is hidden or on a non-Home page.
-                                if let Ok(stats) = crate::db::queries::get_token_usage_stats(&conn)
-                                {
-                                    let text = format_tokens_compact(stats.today);
-                                    if let Some(tray) = periodic_handle.tray_by_id("main") {
-                                        let _ = tray.set_title(Some(&text));
-                                        let _ = tray.set_tooltip(Some(&format!(
-                                            "CodeVetter\nToday: {text}"
-                                        )));
-                                    }
                                 }
                             }
                             Err(e) => {
@@ -306,44 +291,8 @@ fn main() {
                 })
                 .expect("failed to spawn transcript-tail thread");
 
-            // ── Menu-bar tray icon ───────────────────────────────
-            // Surfaces token-usage stats next to volume/battery on macOS.
-            // Frontend pushes a compact string via `set_tray_text` whenever
-            // the dashboard polls (every 60s).
-            let show = MenuItemBuilder::with_id("show", "Open CodeVetter").build(app)?;
-            let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-            let menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
-
-            TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().expect("default icon").clone())
-                .icon_as_template(true)
-                .menu(&menu)
-                .show_menu_on_left_click(true)
-                .tooltip("CodeVetter")
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    "show" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.unminimize();
-                            let _ = w.set_focus();
-                        }
-                    }
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .build(app)?;
-
-            // Intercept window close (X button): hide instead of quit so the
-            // tray icon stays alive and the user can reopen via "Open CodeVetter".
-            if let Some(window) = app.get_webview_window("main") {
-                let w = window.clone();
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        let _ = w.hide();
-                        api.prevent_close();
-                    }
-                });
-            }
+            // Menu-bar tray removed (unused). Closing the window quits the app
+            // normally — no hide-to-tray interception.
 
             Ok(())
         })
@@ -468,9 +417,6 @@ fn main() {
             commands::talks::get_talk,
             commands::talks::list_project_talks,
             commands::talks::get_latest_talk,
-            // Tray
-            commands::tray::set_tray_text,
-            commands::tray::set_tray_menu,
             // Repo Unpacked
             commands::unpack::scan_repo_inventory,
             commands::unpack::generate_unpack_report,
@@ -490,18 +436,6 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-fn format_tokens_compact(n: i64) -> String {
-    if n >= 1_000_000_000 {
-        format!("{:.2}B", n as f64 / 1_000_000_000.0)
-    } else if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{}k", n / 1_000)
-    } else {
-        n.to_string()
-    }
 }
 
 /// Run a lightweight startup index using its own database connection.
