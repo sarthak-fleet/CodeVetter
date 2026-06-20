@@ -1,48 +1,219 @@
-# Project Status
+# CodeVetter — PROJECT STATUS
+Last updated: 2026-06-20
 
-Last updated: 2026-06-12
+## Why / What
 
-## Current Scope
+**CodeVetter** is a local-first desktop workbench for verifying agent-generated code. Product thesis: evidence-backed loops that answer "what changed, why, what could break, can we reproduce it, did the fix work?" — not generic IDE replacement.
 
-CodeVetter is a local-first desktop workbench for checking agent-generated code. The active product direction is evidence-backed software quality review: code review, bug finding, synthetic user QA, replay, and debugging surfaces that help a human decide whether agent-written work is actually shippable.
+**Users:** Developers reviewing agent-written diffs; fleet operators curating catch-rate benchmarks; solo builders needing synthetic QA and session intelligence.
 
-## Done
+**Constraints:** Near-term focus is benchmark curation (20–30 real public agent PRs) and closing evidence gaps before external catch-rate claims. macOS desktop not Developer ID signed/notarized — recommend app archive over DMG.
 
-- Desktop app and local workflow foundation are in place, with repo unpacking, review entry points, and local-first positioning documented in the README.
-- **Rust/Tauri backend cleanup (2026-06-20):** feature-gated `chromiumoxide` for optional live-browser agent work; pruned dead crates/deps; parallelized review paths for slimmer default builds when browser automation is off.
-- Bug finding and code review are the primary implemented workflows.
-- Review replay prototypes were added for synthetic QA and intent debugging, including `/qa-replay` and `/intent-debugger` routes.
-- Risk-tiered specialist review is implemented in the CLI review path: trivial single pass, lite product/agent passes, full sensitive reviews with security/product/agent passes plus coordinator/dedupe metadata.
-- Synthetic user QA has a first-loop prototype plus runner selection: built-in Playwright, repo-local Playwright specs, or an external skill command that returns the same evidence JSON contract. The Review UI now supports repo-scoped named local QA workflows with global fallback, route/goal target matrices, Playwright storage-state auth, remote-target opt-in, labeled/openable artifact display, bounded text previews for log/json/html artifacts, and recent QA runs per review. Repo Playwright runs retain attachments plus saved JSON reports and raw logs as artifacts. QA runs are now persisted as first-class local SQLite records with preference fallback, current QA run history is fed into CLI review prompts/results as compact `qa_evidence` runtime proof, and successful fix runs now automatically rerun the latest pre-fix QA flow when one exists, prefer the fix worktree for repo-local Playwright reruns, retain a same-flow manual retry button, and produce a deterministic post-fix QA comparison that classifies the rerun as fixed, still broken, regressed, still passing, or still needing a rerun in UI and copied proof. Repo Unpacked now computes deterministic Synthetic QA readiness from runner config/dependencies, browser specs, local app scripts, QA scripts, artifact signals, and route/page candidates, renders it in the inventory view, includes it in synthesis prompts, and exports it in handoffs.
-- Intent debugging has CLI/test entry points through `test:intent-debugger` and `intent-debugger`, and the main Review screen now shows intent-level verification gaps plus a compact timeline linking goal, history, review, QA, fix, evidence, command snippets, command source breakdowns, and agent-claim snippets.
-- Prior-intent mining is attached to review history context through recent commits, prior agent talks, raw Claude/Codex session replay, recurring findings, inline `WHY:` / `DECISION:` / `TRADEOFF:` markers, and decision-shaped git subjects. Review findings now show file-linked history summaries and export that context in proof handoffs, including compact command evidence rows with status/source/event/artifact anchors. Repo Unpacked now persists and exports a deterministic `history_brief` inventory artifact with bounded local git commit subjects, cited decision markers, and verification hints, and renders it in the inventory view. Proof markdown generation is covered by `test:review-proof`. Command/test snippets mined from agent transcripts now carry conservative `passed` / `failed` / `stale` / `unknown` status, source/event anchors, talk/session/review IDs when available, and nearby artifact paths when logs/screenshots/traces are mentioned. Structured command evidence from stored agent talks is preferred, raw session JSONL shell/tool calls are replayed when indexed sessions are available, including Claude `tool_use`, Codex payload commands, OpenAI-style `tool_calls`, and Gemini-style `functionCall` / `functionResponse` records. Raw-session command rows include bounded normalized context excerpts from nearby transcript/result lines, can preview a wider normalized transcript window around the command line, or open the full source transcript file from Review. Compact command evidence, including the first context excerpt when present, is injected into review prompts.
-- A catch-rate benchmark harness exists under `benchmarks/agent-prs` with `npm run bench:catch-rate`, per-case or combined fixtures, `npm run bench:new-case` starter generation, `npm run bench:curation` readiness reporting, strict fixture validation, non-placeholder evidence/rationale validation for publishable fixtures, named CodeVetter / CodeRabbit free-tier / Claude Code review output slots, false-positive and redundant-match counts, precision/F1, baseline deltas, JSON/Markdown report output, durable report files, overall catch-rate gates, severity-specific catch-rate gates, false-positive gates, redundant-match gates, and `npm run test:benchmark` coverage for the core CLI gates.
-- Fix diffs support file-level and hunk-level revert from the Review UI.
-- Agent Verification Environment slice is wired into Review: fix attempts already run in isolated git worktrees, selected findings now build structured agent fix packets with task goal, acceptance criteria, non-goals, browser/QA evidence refs, and usage-routing advice, and the Review sidebar shows a compact review/evidence/fix/worktree status timeline.
-- Evidence Pattern Search has its first vertical slice: deterministic risk candidate packets are generated from changed files, sensitive paths, optional `ast-grep` structural matches, blast/history context, and verification signals; the top ranked candidates and procedure gates are injected into CLI review prompts, returned in review metadata, shown in the Review sidebar, can be resolved per review, persist candidate outcomes locally, write durable procedure events for QA/fix/test-evidence runs, suggest scored verification commands from prior pass/fail recency, package-manager-aware repo scripts, changed/finding file affinity, and artifacts, run explicit local verification commands with cancelable timeout-bounded stdout/stderr log artifacts, derive additional execution links from finding/browser evidence, show a fuller procedure event timeline, and are included in copied reviewer proof with outcomes, artifacts, gates, linked execution events, and blocked-on reasons.
-- The catch-rate benchmark harness can now compare stored review outputs with and without deterministic evidence search using `--evidence-comparison=with:without`, including catch-rate, precision/F1, false-positive, redundant-match, newly-caught, and regressed-ID deltas in JSON and Markdown reports.
-- Review Memory Graph has a repo-level and review-scoped first slice: Repo Unpacked now persists a deterministic local `repo_graph` artifact with package scripts, routes, Tauri commands, DB tables, tests, and decision markers; exports local graph JSON plus agent-context markdown sidecars for optional Graphify/Hunk-style interop without adding either dependency; imports graph JSON only through an explicit Repo Unpacked file action, validates CodeVetter or loose graph-shaped JSON, and renders imported graphs as non-mutating previews; CLI review results also carry a bounded local graph over changed files, evidence candidates, procedure gates, blast/history context, the review prompt includes that graph neighborhood, Review shows a compact graph panel plus selected-finding graph focus, copied reviewer proof includes both full graph and focused finding graph nodes/edges, and Review can copy a selected finding as a Hunk-style agent-context note with file/line, evidence status, local history, focused graph, and next verification actions.
-- Agent Verification Timeline has a first normalized spine: Review now builds a shared task/review/QA/evidence/claim-check/fix/worktree timeline contract, attaches bounded raw-session command anchors and compact multi-turn command replay packets to evidence rows with transcript excerpts, adds a dedicated Claim check row for failed/stale command claims, unknown verification-command outcomes, explicit extracted agent claims, positive test/check claims contradicted by failed/stale command evidence, unchecked findings, latest QA failures without post-fix comparison, unresolved post-fix QA, fixes without same-flow reruns, evidence-count-only loops with no executable proof, possible scope drift when fix edits land outside reviewed finding files, broad repeated edits without evidence progress, and clean loops with passed command/QA proof counts, attaches edit-origin anchors for fix changed files to worktree rows, renders timeline stages and anchors in the sidebar, exposes first-class jump targets for findings, files, QA artifacts, fix worktrees, command source anchors, and edited files, shows same-flow post-fix QA before/after deltas with artifact anchors on the QA row, can copy segment-scoped fix packets directly from Review/Evidence/QA/Fix/Worktree timeline rows, includes clicked-row timeline replay metadata and transcript snippets in those packets, and includes the same timeline plus source/event/artifact/jump/edit/transcript anchors in copied reviewer proof.
-- Codebase History Explainer has a first file-level slice: Review now builds bounded, cited "why this code exists" explanations from local commits, decision markers, recurring findings, agent notes, and command anchors, renders them in the sidebar, and includes them in copied reviewer proof.
-- AI Session Intelligence has a first local scorecard slice: indexed sessions produce a schema-versioned six-dimension scorecard with cited evidence refs, anti-gaming notes, recommendations, normalized Claude/Codex/Cursor adapter coverage summaries, production and scorecard adapter run metadata/parse warnings in `session_adapter_runs`, a compact `session_message_archive` for normalized adapter messages/tool calls, local backfill for previously indexed Claude/Codex sessions missing archive rows, FTS-backed local archive search over messages/tool calls, startup/periodic/manual archive update events, a shared raw parser adapter contract with Claude/Codex/Cursor fixtures, Claude/Codex/Cursor production indexing wired through that contract, a Tauri IPC contract, compact Roadmap dashboard panels for scorecard and source health, visible adapter run status, per-adapter run trends, and recent-run drilldowns.
-- Home now opens directly into a usage dashboard panel with Today/Week/Month/Year counters above error or roadmap noise. The Verification Workbench launcher and latest build banner live on the Roadmap page, so Evidence Search, Agent Timeline, Synthetic QA, Memory Graph, History Brief, AI Sessions, transcript replay, claim checks, replay packets, timeline fix packets, edit origins, and post-fix QA deltas remain visible without pushing usage down on app launch.
-- OSS repo-analysis engines were evaluated in `docs/oss-integration-evaluation.md`; optional `ast-grep` changed-file evidence is implemented behind PATH detection with no required runtime dependency.
-- Product direction has been consolidated around agent-written code verification, evidence levels, timelines, and explainable codebase history.
+**IN scope:** Tauri 2 desktop (`apps/desktop/`), Astro landing (`apps/landing-page-astro/`), catch-rate harness (`benchmarks/agent-prs/`).
 
-## Planned Next
+**OUT of scope:** Marketplace, hosted multi-tenant collaboration, CI enforcement, generic browser testing for every app type, broad IDE replacement.
 
-1. Continue the AI Session Intelligence PRD in `docs/PRD-AI-SESSION-INTELLIGENCE.md`: add direct filesystem-watch tailing for currently open transcript files if periodic indexing proves too coarse; Claude, Codex, and Cursor production session rows now use the normalized raw parser adapter contract, production index passes persist adapter run metadata/parse warnings plus compact message/tool-call archive rows, local backfill repairs older Claude/Codex sessions with missing archive rows, Roadmap shows latest source-health status with per-adapter trends and recent-run drilldowns, Roadmap can search the normalized archive locally, and startup/periodic/manual indexes emit archive update events.
-2. Continue the Agent Verification Timeline PRD in `docs/PRD-AGENT-VERIFICATION-TIMELINE.md`: add fuller non-command conversation reconstruction around replay packets; raw session command anchors with bounded transcript excerpts, explicit agent-claim anchors, command/QA/evidence-count claim-check signals, scope-drift and repeated-edit discrepancy anchors, command-event replay packets, edit-origin anchors, timeline-specific jump targets, timeline-segment replay packets, same-flow post-fix QA deltas, archive search, and the Roadmap latest-build banner are now attached to visible Review/Roadmap actions and proof export.
-3. Continue the Codebase History Explainer PRD in `docs/PRD-CODEBASE-HISTORY-EXPLAINER.md`: turn the persisted `history_brief` slice into a queryable local history graph; Repo Unpacked history brief integration and agent-context sidecar export are now implemented.
-4. Curate 20-30 real public agent-generated PR benchmark cases with hand-labeled ground truth before making external catch-rate claims.
-5. Add benchmark fields for unverified-fix count and time/cost impact once review artifacts capture those values consistently.
-6. Add full non-command conversation reconstruction around raw command events when review needs more than command-event replay packets and the normalized command/result window; current history context already extracts anchored shell/tool command events from indexed Claude/Codex JSONL sessions, handles common OpenAI/Gemini tool-call shapes, shows raw/structured command counts, includes bounded normalized context excerpts, previews wider normalized transcript windows, opens source transcript files, and now groups adjacent command events into compact replay packets.
-7. Curate real CodeRabbit free-tier and Claude Code `/review` outputs into the named benchmark comparator slots.
-8. Curate larger public benchmark fixtures.
-9. Add richer screenshot/report previews once the local preview security model is explicit; text-like QA artifacts already have bounded inline previews.
+## Dependencies
 
-## Deferred / Parked
+### External
 
-- Broad IDE replacement behavior is parked; CodeVetter should stay focused on verification and review.
-- Generic synthetic browser testing for every app type is deferred until the supported local-app matrix is explicit.
-- Marketplace, hosted multi-tenant collaboration, and CI enforcement are deferred behind a stronger local evidence loop.
+- **AI providers:** Anthropic, OpenAI, OpenRouter — user-supplied keys stored in desktop Settings.
+- **GitHub:** PR creation/merge, CI checks, T-Rex PR watcher.
+- **Linear:** auth integration in Settings.
+- **Cloudflare Pages:** landing deploy via `CLOUDFLARE_API_TOKEN`.
+- **Tauri updater:** GitHub Releases `latest.json`, signing via `TAURI_SIGNING_PRIVATE_KEY`.
+- **Optional:** `ast-grep` (PATH detection), `chromiumoxide` (`browser-agent` feature for live browser agent).
+
+### Internal (fleet)
+
+- **SaaS Maker:** sign-in polling, task list/update, finding push, fleet project linking; fleet rollup, weekly markdown, changelog push.
+- **Fleet repos:** cross-fleet rollup via linked repos (`/fleet` route).
+
+### Stack & commands
+
+**Stack:** Tauri 2 + React 19 + Vite + Tailwind/shadcn (desktop); Rust backend with optional `chromiumoxide` (`browser-agent` feature); local SQLite (`@tauri-apps/plugin-sql`); Astro 5 landing (Cloudflare Pages). npm workspaces.
+
+| Command | Location | Purpose |
+|---------|----------|---------|
+| `npm install` | root | Workspace install |
+| `npm run tauri:dev` | `apps/desktop` | Desktop dev (port 1420) |
+| `npm run tauri:build` | `apps/desktop` | Production desktop binary |
+| `npm test` | `apps/desktop` | Playwright e2e |
+| `npm run test:unit` | `apps/desktop` | Node unit tests |
+| `npm run test:review-proof` | `apps/desktop` | Review proof tests |
+| `npm run test:synthetic-qa` | `apps/desktop` | Synthetic QA tests |
+| `npm run test:intent-debugger` | `apps/desktop` | Intent debugger tests |
+| `npm run bench:catch-rate` | root | Catch-rate benchmark harness |
+| `npm run bench:curation` | root | Benchmark curation report |
+| `npm run bench:new-case` | root | Scaffold benchmark case |
+| `npm run build` | `apps/landing-page-astro` | Static landing build |
+
+## Timeline
+
+- **2026-06-20** — PRD batch shipped: Evidence Pattern Search, Agent Verification Timeline, Review Memory Graph, Codebase History Explainer, Synthetic User QA, AI Session Intelligence.
+- **2026-06-20** — Rust/Tauri backend cleanup: feature-gated `chromiumoxide`; pruned dead crates/deps; parallelized review paths.
+- **Earlier** — Landing migrated to Astro (`apps/landing-page-astro/`); legacy Next.js landing superseded (not deployed).
+- **Ongoing** — `weekly.yml` Mondays 09:00 UTC best-effort lint/typecheck/test/build; `auto-release.yml` + `release.yml` macOS aarch64 builds with signed updater.
+
+## Products
+
+- **Desktop app:** GitHub Releases — Tauri 2 macOS aarch64 binary with auto-updater (`latest.json`); dev port 1420.
+- **Landing (Pages):** https://codevetter.com — Cloudflare Pages project `codevetter`; routes `/`, `/download`, `/privacy`, `/terms`, `/benchmark`.
+- **Benchmark harness:** `benchmarks/agent-prs/` + `scripts/run-catch-rate-benchmark.mjs` (root workspace).
+- **Legacy (not deployed):** `apps/landing-page/` (Next.js) superseded by Astro.
+
+## Features (shipped)
+
+### Desktop routes (`apps/desktop/src/App.tsx`, React Router v7)
+
+- `/` Home — usage dashboard (Today/Week/Month/Year token stats, provider accounts, agent breakdown, session adapter health, AI session scorecard panels).
+- `/review` QuickReview — primary workbench: diff review, CLI agents, findings, evidence, timeline, fix worktrees, synthetic QA, blast radius, sandbox, hunk nav `[`/`]`, revert files/hunks, proof export.
+- `/roadmap` — Verification Workbench launcher, AI Session Intelligence panels, SaaS Maker tasks.
+- `/rubrics` — review standards packs.
+- `/unpack` RepoUnpacked — repo inventory scan, system brief, `repo_graph`, history brief, QA readiness, graph JSON import/export.
+- `/intel` — commit attribution, DORA metrics, AI acceleration, tool breakdown, pricing table.
+- `/fleet` — cross-fleet rollup, linked repos, weekly markdown, changelog push.
+- `/trex` — T-Rex v2 PR watcher (start/stop, poll, PR run history, APPROVE/NEEDS_REVIEW/BLOCK).
+- `/ops` — billing config, agent observability, webhook notifications.
+- `/agent-memories` — browse local agent memory sources (AGENTS.md, rules).
+- `/intent-debugger` — commit intent analysis (real commits or fixtures).
+- `/qa-replay` — synthetic QA fixture replay + live agent runner.
+- `/settings` — AI providers, GitHub/Linear auth, SaaS Maker, review preferences.
+- Cmd+K command palette; `g`+key nav; onboarding gate; tray monitor; auto-updater.
+
+### Tauri commands (107 registered in `main.rs`)
+
+- Review: `get_local_diff`, `save_review`, `get_review`, `list_reviews`, `run_cli_review`, `fix_findings`, `merge_fix`, `discard_fix`, `revert_files`, `revert_diff_hunk`.
+- Evidence: `record_review_procedure_event`, `list_review_procedure_events`, `suggest_review_verification_commands`, `run_review_verification_command`, `cancel_review_verification_command`, `analyze_blast_radius`.
+- Sessions: `list_sessions`, `list_session_message_archive`, `search_session_message_archive`, `get_ai_session_scorecard`, `list_ai_session_adapter_runs`.
+- Repo Unpacked: `scan_repo_inventory`, `generate_unpack_report`, `list/get/delete/export_repo_unpack_report`, `import_repo_graph_json`.
+- Synthetic QA: `run_synthetic_qa`, `discover_playwright_specs`, `record_synthetic_qa_run`, `list_synthetic_qa_runs`.
+- Intent/history: `list_commit_intents`, `get_repo_history_context`, `read_raw_session_context`, `list_git_branches`, `get_git_remote_info`.
+- GitHub PR/CI: `create_pull_request`, `list/get/merge_pull_request`, `list_ci_checks`, `rerun_failed_checks`.
+- SaaS Maker: sign-in polling, task list/update, finding push, fleet project linking.
+- Fleet: `list_linked_repos`, `get_fleet_rollup`, `generate_weekly_fleet_markdown`, `push_changelog_entry`.
+- T-Rex: `start/stop_trex_watcher`, `list_trex_watchers`, `list_trex_pr_runs`, `force_poll_trex_watcher`.
+- Providers: account CRUD, usage checks, ledger.
+- `agent_run_task` — live browser agent (feature-gated `browser-agent`).
+
+### Code review & bug finding
+
+- Risk-tiered specialist review: trivial single pass, lite product/agent passes, full sensitive reviews (security/product/agent + coordinator dedupe).
+- Findings with severity, code viewer, re-review loop.
+- Verification summary handoff proof: fixed/reproduced/unchecked tallies, copyable reviewer handoff template.
+- Unchecked-finding risk summary grouped by severity.
+- Revalidation checklist after fixes (derived from evidence fields, persists per finding).
+- Agent Verification Environment: isolated git worktrees, structured fix packets, status timeline.
+
+### Evidence Pattern Search (PRD shipped 2026-06-20)
+
+- Deterministic `generate_evidence_candidates` from changed files, sensitive paths, blast/history, optional `ast-grep`.
+- Ranked packets injected into CLI review prompts.
+- Procedure gates + verification command suggestions; cancelable timeout-bounded execution with log artifacts.
+- Sidebar panel + copied proof; benchmark `--evidence-comparison=with:without` mode.
+
+### Agent Verification Timeline (PRD shipped 2026-06-20)
+
+- Normalized spine: task, review, QA, evidence, fix, worktree via `buildVerificationTimeline`.
+- Review sidebar timeline with jump targets; claim-check row (failed/stale commands, scope drift).
+- Command anchors + replay packets from raw session context.
+- Segment-scoped fix packets; post-fix QA before/after deltas.
+
+### Review Memory Graph (PRD shipped 2026-06-20)
+
+- `repo_graph` artifact in Repo Unpacked (files, routes, Tauri commands, DB tables, tests, decisions).
+- Review-scoped `review_memory_graph` in CLI results + prompt neighborhood section.
+- Sidebar graph panel + proof export; Hunk-style agent-context notes; `[`/`]` hunk navigation.
+- Explicit JSON import via Repo Unpacked.
+
+### Codebase History Explainer (PRD shipped 2026-06-20)
+
+- `history_brief` in Repo Unpacked (commits, `WHY:`/`DECISION:`/`TRADEOFF:` markers, test hints).
+- File-level cited explanations in Review sidebar + copied proof.
+- `queryCodebaseHistoryExplanationForFile` hook; deterministic `buildCodebaseHistoryExplanations`.
+- Command evidence rows: `passed`/`failed`/`stale`/`unknown`.
+
+### Synthetic User QA (PRD shipped 2026-06-20)
+
+- Runners: built-in Playwright, repo-local Playwright specs, external skill command (shared evidence JSON).
+- Repo-scoped named workflows, route/goal matrices, Playwright storage-state auth, remote opt-in.
+- `synthetic_qa_runs` SQLite records; `qa_evidence` in review prompts.
+- Auto same-flow QA rerun after successful fix + comparison (fixed/still broken/regressed/still passing).
+- Repo Unpacked `qa_readiness` score; `/qa-replay` fixture loops.
+
+### AI Session Intelligence (PRD shipped 2026-06-20)
+
+- Six-dimension scorecard: session_hygiene, verification_quality, scope_control, repo_guidance, testability, evidence_quality.
+- Adapters: Claude Code, Codex, Cursor (+ Grok indexing).
+- FTS5 `session_message_archive`; 10s transcript tail watcher re-indexing active JSONL.
+- Roadmap dashboard panels (scorecard, adapter health, archive search).
+
+### Intent debugging
+
+- `/intent-debugger` + CLI `intent-debugger` over real recent commits — intent, risks, verification gaps, agent-vs-human authorship.
+- Review sidebar shows intent-level verification gaps + compact timeline.
+
+### Benchmarks & OSS evaluation
+
+- Catch-rate harness: `benchmarks/agent-prs/` + `scripts/run-catch-rate-benchmark.mjs`.
+- Per-case fixtures, strict validation, comparator slots (codevetter, codevetter_no_evidence, baseline).
+- Metrics: catch rate, precision, F1, false positives, severity gates, evidence-comparison mode.
+- Sample placeholder cases only; curation helpers `bench:new-case`, `bench:curation`.
+- OSS repo-analysis evaluation documented; optional `ast-grep` behind PATH detection.
+
+### SQLite schema (28 tables + FTS5)
+
+- Core: `cc_projects`, `cc_sessions`, `cc_session_days`, `session_adapter_runs`, `session_message_archive`, `session_message_archive_fts`.
+- Reviews: `local_reviews`, `local_review_findings`, `review_procedure_events`, `synthetic_qa_runs`.
+- Mission control: `agent_processes`, `agent_tasks`, `activity_log`, `agent_messages`, `agent_cost_log`, `agent_presets`.
+- Providers: `provider_accounts`, `provider_usage_ledger`.
+- Fleet: `saas_maker_sync`, `repo_project_mapping`, `repo_unpacked_reports`.
+- T-Rex: `trex_watchers`, `trex_pr_runs`.
+- App: `preferences`, `workspaces`, `chat_tabs`, `diff_comments`, `agent_talks`.
+
+### Landing page (`apps/landing-page-astro/`)
+
+- Routes: `/`, `/download`, `/privacy`, `/terms`, `/benchmark`.
+- Deployed to Cloudflare Pages project `codevetter` via `deploy-landing.yml`.
+- Sections: Hero, CatchStrip, Stats, Bento, HowItWorks, Providers, Pricing, CTA.
+
+### CI/CD
+
+- `ci.yml`: ESLint + tsc + unit tests on push/PR.
+- `auto-release.yml` + `release.yml`: version bump → GitHub Release → macOS aarch64 Tauri build with `browser-agent`, signed updater.
+- `deploy-landing.yml`: Astro build + CF Pages deploy + smoke curl.
+- `weekly.yml`: best-effort lint/typecheck/test/build.
+
+### Tests
+
+- TS unit: 9 files (review-proof, agent-fix-packet, synthetic-qa, intent-debugger, etc.).
+- Playwright e2e: 11 spec files (smoke, review, evidence, settings, intel, fleet, ops, sandbox).
+- Rust: ~217 `#[test]` fns across git, history, saas_maker, unpack, evidence_pattern, etc.
+- Root: `test:benchmark` for harness self-tests.
+
+## Todo / Planned / Deferred / Blocked
+
+### Planned
+
+1. Curate 20–30 real public agent-generated PR benchmark cases in `benchmarks/agent-prs/cases/` with hand-labeled ground truth.
+2. Add benchmark fields for unverified-fix count and time/cost impact in `scripts/run-catch-rate-benchmark.mjs`.
+3. Full non-command conversation reconstruction around raw command events (`read_raw_session_context` expansion).
+4. Curate CodeRabbit free-tier and Claude Code `/review` outputs into named comparator slots.
+5. Turn persisted `history_brief` into queryable local history graph API (`apps/desktop/src/lib/review-proof.ts`).
+6. Richer screenshot/report previews once local preview security model is explicit.
+7. Continue AI Session Intelligence phases: usage/stats JSON contracts, repo readiness report, team packaging research.
+8. Add Playwright e2e to `ci.yml`; remove stale `/personas` and `/ask` e2e specs.
+
+### Deferred
+
+- Broad IDE replacement — stay focused on verification and review.
+- Generic synthetic browser testing for every app type — deferred until supported local-app matrix is explicit.
+- Marketplace, hosted multi-tenant collaboration, CI enforcement — deferred behind stronger local evidence loop.
+- PRD deferred slices: full conversation reconstruction; queryable history graph API; flaky-step labeling; team packaging.
+
+### Blocked
+
+- Catch-rate claims blocked on real fixture curation (currently 3 placeholder cases in `sample.json`).
+- Screenshot/report inline previews limited to bounded text previews for log/json/html artifacts.
+- macOS desktop bundle not Developer ID signed/notarized.
+- Playwright e2e and Rust tests not in `ci.yml` (unit tests only).

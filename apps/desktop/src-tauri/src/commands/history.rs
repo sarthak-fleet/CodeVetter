@@ -182,6 +182,68 @@ pub fn emit_session_archive_updated(app: &AppHandle, summary: &FullIndexSummary)
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptTailSummary {
+    pub sessions_tailed: u64,
+    pub messages_indexed: u64,
+    pub tailed_at: String,
+}
+
+/// Incrementally re-index recently active transcript files between full index passes.
+pub fn tail_live_transcript_sessions_with_conn(
+    conn: &rusqlite::Connection,
+) -> Result<TranscriptTailSummary, String> {
+    let since = (chrono::Utc::now() - chrono::Duration::minutes(120)).to_rfc3339();
+    let sources = queries::list_live_session_sources(conn, &since, 16).map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut sessions_tailed = 0u64;
+    let mut messages_indexed = 0u64;
+
+    for source in sources {
+        let path = std::path::Path::new(&source.jsonl_path);
+        if !path.exists() {
+            continue;
+        }
+        let result = match source.agent_type.as_str() {
+            "claude-code" => index_adapter_session(
+                &ClaudeCodeAdapter,
+                path,
+                conn,
+                &source.project_id,
+                &now,
+            ),
+            "codex" => index_adapter_session(
+                &CodexAdapter,
+                path,
+                conn,
+                &source.project_id,
+                &now,
+            ),
+            _ => continue,
+        };
+        match result {
+            Ok(indexed) => {
+                if indexed.messages_indexed > 0 {
+                    sessions_tailed += 1;
+                    messages_indexed += indexed.messages_indexed;
+                }
+            }
+            Err(error) => {
+                log::debug!(
+                    "Transcript tail skipped {}: {error}",
+                    source.jsonl_path
+                );
+            }
+        }
+    }
+
+    Ok(TranscriptTailSummary {
+        sessions_tailed,
+        messages_indexed,
+        tailed_at: now,
+    })
+}
+
 #[tauri::command]
 pub async fn trigger_index(app: AppHandle) -> Result<Value, String> {
     // Index against a private WAL connection on a blocking thread — exactly the

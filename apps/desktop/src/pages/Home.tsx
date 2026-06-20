@@ -24,6 +24,7 @@ import type {
   AgentUsageRow,
   LiveUsageResult,
   ProviderAccount,
+  ProviderUsageLedgerRow,
   SessionAdapterRun,
   SessionScorecard,
   TokenUsageStats,
@@ -38,6 +39,7 @@ import {
   getTokenUsageStats,
   isTauriAvailable,
   listProviderAccounts,
+  listProviderUsageLedger,
   triggerIndex,
 } from "@/lib/tauri-ipc";
 
@@ -878,13 +880,21 @@ function TokenUsageChart({
   );
 }
 
-// ─── WeeklyAgentSplit (stacked bar of this-week REAL compute by agent) ───────
+// ─── WeeklyAgentSplit (per-agent token split, two bars) ──────────────────────
 //
 // Keyed by indexed agent_type (not provider account) so every indexed agent —
-// including Grok and Cursor — appears. Uses real compute (input minus cache
-// reads, plus output) rather than the cache-inclusive input total: Claude and
-// Codex are ~96-98% cache reads, so the raw input total wildly overstates one
-// agent's share. Grok/Cursor token counts are per-turn-context estimates.
+// including Grok and Cursor — appears. We show TWO bars because the agents log
+// tokens on incompatible bases:
+//   • "Total burn (cache-incl)" = real_input + cache_read + output. Mirrors
+//     ccusage; Claude/Codex dominate because ~96-98% of their tokens are cache
+//     reads (re-sent context counted every turn).
+//   • "Fresh tokens (cache-free)" = real_input + output. Cache reads aren't
+//     comparable across agents (Grok/Cursor logs don't expose them), so this is
+//     the fair cross-agent split — Grok and Cursor become visible.
+// Cursor's local cc_sessions value is a chars÷4 estimate that misses all IDE
+// usage, so when the live-API ledger has a cursor row we use it as the source
+// of truth instead (see CursorAgentTokens below). Grok stays a per-turn-context
+// estimate (no output/cache logged).
 
 const AGENT_PALETTE: Record<string, { bar: string; label: string; estimated?: boolean }> = {
   "claude-code": { bar: "#d6a947", label: "Claude" },
@@ -892,6 +902,74 @@ const AGENT_PALETTE: Record<string, { bar: string; label: string; estimated?: bo
   cursor: { bar: "#a78bfa", label: "Cursor", estimated: true },
   grok: { bar: "#5da6f5", label: "Grok", estimated: true },
 };
+
+type AgentSegment = { agent: string; tokens: number; estimated: boolean };
+
+function StackedBar({ title, segments }: { title: string; segments: AgentSegment[] }) {
+  const filtered = segments
+    .filter((s) => s.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens);
+  const grandTotal = filtered.reduce((acc, s) => acc + s.tokens, 0);
+  if (filtered.length === 0 || grandTotal === 0) return null;
+
+  const paletteFor = (agent: string) =>
+    AGENT_PALETTE[agent] ?? { bar: "#64748b", label: agent };
+  const anyEstimated = filtered.some((s) => s.estimated);
+
+  return (
+    <div>
+      <div className="mb-2.5">
+        <div className="text-[11px] text-slate-500">{title}</div>
+        <div className="text-xs text-slate-400 tabular-nums">
+          {formatTokens(grandTotal)} tokens · {filtered.length} agent
+          {filtered.length === 1 ? "" : "s"}
+        </div>
+      </div>
+      {/* Stacked bar */}
+      <div className="flex h-2.5 w-full overflow-hidden rounded-sm bg-[#0b0d12] ring-1 ring-[#1a1a1a]">
+        {filtered.map((s) => {
+          const palette = paletteFor(s.agent);
+          const pct = (s.tokens / grandTotal) * 100;
+          return (
+            <div
+              key={s.agent}
+              title={`${palette.label}: ${formatTokens(s.tokens)} (${pct.toFixed(0)}%)${s.estimated ? " · est." : ""}`}
+              style={{ width: `${pct}%`, backgroundColor: palette.bar }}
+              className="h-full transition-all"
+            />
+          );
+        })}
+      </div>
+      {/* Legend */}
+      <div className="mt-2.5 flex flex-wrap gap-x-4 gap-y-1.5">
+        {filtered.map((s) => {
+          const palette = paletteFor(s.agent);
+          const pct = (s.tokens / grandTotal) * 100;
+          return (
+            <div key={s.agent} className="flex items-center gap-1.5 text-[11px]">
+              <span
+                className="h-2 w-2 rounded-full"
+                style={{ backgroundColor: palette.bar }}
+              />
+              <span className="text-slate-300">
+                {palette.label}
+                {s.estimated ? "*" : ""}
+              </span>
+              <span className="tabular-nums text-slate-500">
+                {formatTokens(s.tokens)} · {pct.toFixed(0)}%
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {anyEstimated && (
+        <div className="mt-2 text-[10px] text-slate-600">
+          * estimated from per-turn context — agent logs no cumulative token billing
+        </div>
+      )}
+    </div>
+  );
+}
 
 function WeeklyAgentSplit() {
   const [rows, setRows] = useState<AgentUsageRow[] | null>(null);

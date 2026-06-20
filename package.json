@@ -19,12 +19,15 @@
     ]
   },
   "devDependencies": {
-    "@saas-maker/eslint-config": "^1.0.7",
-    "@typescript-eslint/eslint-plugin": "^8.57.1",
-    "@typescript-eslint/parser": "^8.57.1",
+    "@eslint/js": "^9.39.4",
     "eslint": "^9.39.4",
+    "eslint-plugin-promise": "^7.2.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.5.0",
     "husky": "^9.1.7",
-    "lint-staged": "^16.4.0"
+    "lint-staged": "^16.4.0",
+    "typescript-eslint": "^8.59.0"
   },
   "optionalDependencies": {
     "@tailwindcss/oxide-linux-x64-gnu": "^4.2.4",

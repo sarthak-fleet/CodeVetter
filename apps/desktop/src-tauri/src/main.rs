@@ -190,6 +190,62 @@ fn main() {
                 })
                 .expect("failed to spawn periodic-index thread");
 
+            // ── Transcript tail watcher (every 10s) ─────────────
+            // Re-index recently active Claude/Codex JSONL files incrementally so
+            // open sessions show up in archive search without waiting for the
+            // 5-minute full index pass.
+            let tail_data_dir = app
+                .path()
+                .app_data_dir()
+                .expect("failed to resolve app data dir");
+            let tail_handle = app.handle().clone();
+            std::thread::Builder::new()
+                .name("transcript-tail".into())
+                .spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(20));
+                    loop {
+                        match db::init_db(tail_data_dir.clone()) {
+                            Ok(conn) => {
+                                match crate::commands::history::tail_live_transcript_sessions_with_conn(
+                                    &conn,
+                                ) {
+                                    Ok(summary) => {
+                                        if summary.messages_indexed > 0 {
+                                            log::info!(
+                                                "Transcript tail indexed {} messages across {} sessions",
+                                                summary.messages_indexed,
+                                                summary.sessions_tailed
+                                            );
+                                            let archive_summary =
+                                                crate::commands::history::FullIndexSummary {
+                                                    indexed_sessions: summary.sessions_tailed,
+                                                    indexed_messages: summary.messages_indexed,
+                                                    skipped_sessions: 0,
+                                                    archive_search_rows_indexed: summary
+                                                        .messages_indexed
+                                                        as i64,
+                                                    indexed_at: summary.tailed_at,
+                                                };
+                                            crate::commands::history::emit_session_archive_updated(
+                                                &tail_handle,
+                                                &archive_summary,
+                                            );
+                                        }
+                                    }
+                                    Err(error) => {
+                                        log::debug!("Transcript tail pass failed: {error}");
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                log::debug!("Transcript tail DB init failed: {error}");
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(10));
+                    }
+                })
+                .expect("failed to spawn transcript-tail thread");
+
             // ── Menu-bar tray icon ───────────────────────────────
             // Surfaces token-usage stats next to volume/battery on macOS.
             // Frontend pushes a compact string via `set_tray_text` whenever
