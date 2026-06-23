@@ -45,7 +45,7 @@ describe('runFixture — broken fixture', () => {
     const failing = run.observations?.filter((o) => !o.pass) ?? [];
     assert.ok(
       failing.some((o) => /run-review action button/i.test(o.description)),
-      'expected the run-review observation to fail',
+      'expected the run-review observation to fail'
     );
   });
 
@@ -53,7 +53,7 @@ describe('runFixture — broken fixture', () => {
     const failing = run.observations?.filter((o) => !o.pass) ?? [];
     assert.ok(
       failing.some((o) => /No uncaught error banner/i.test(o.description)),
-      'expected the error-banner not_contains observation to fail',
+      'expected the error-banner not_contains observation to fail'
     );
   });
 
@@ -70,7 +70,7 @@ describe('runFixture — broken fixture', () => {
 describe('runFixture — observation edge cases', () => {
   const makeFixture = (
     html: string,
-    observations: SyntheticQaFixture['observations'],
+    observations: SyntheticQaFixture['observations']
   ): SyntheticQaFixture => ({
     id: 'edge',
     label: 'edge',
@@ -86,7 +86,7 @@ describe('runFixture — observation edge cases', () => {
     const r = runFixture(
       makeFixture('<p>hello world</p>', [
         { kind: 'contains_text', description: 'has hello', needle: 'hello' },
-      ]),
+      ])
     );
     assert.equal(r.pass, true);
     assert.match(r.observations![0].detail, /Found "hello"/);
@@ -96,7 +96,7 @@ describe('runFixture — observation edge cases', () => {
     const r = runFixture(
       makeFixture('<p>bye</p>', [
         { kind: 'contains_text', description: 'has hello', needle: 'hello' },
-      ]),
+      ])
     );
     assert.equal(r.pass, false);
     assert.match(r.observations![0].detail, /Expected snapshot to contain "hello"/);
@@ -106,7 +106,7 @@ describe('runFixture — observation edge cases', () => {
     const r = runFixture(
       makeFixture('<p>bye</p>', [
         { kind: 'not_contains_text', description: 'no hello', needle: 'hello' },
-      ]),
+      ])
     );
     assert.equal(r.pass, true);
     assert.match(r.observations![0].detail, /Absent: "hello"/);
@@ -116,7 +116,7 @@ describe('runFixture — observation edge cases', () => {
     const r = runFixture(
       makeFixture('<p>hello</p>', [
         { kind: 'not_contains_text', description: 'no hello', needle: 'hello' },
-      ]),
+      ])
     );
     assert.equal(r.pass, false);
     assert.match(r.observations![0].detail, /unexpectedly contains "hello"/);
@@ -125,8 +125,13 @@ describe('runFixture — observation edge cases', () => {
   it('regex_match passes and echoes pattern + flags', () => {
     const r = runFixture(
       makeFixture('<title>HELLO</title>', [
-        { kind: 'regex_match', description: 'case-insensitive title', pattern: 'hello', flags: 'i' },
-      ]),
+        {
+          kind: 'regex_match',
+          description: 'case-insensitive title',
+          pattern: 'hello',
+          flags: 'i',
+        },
+      ])
     );
     assert.equal(r.pass, true);
     assert.match(r.observations![0].detail, /\/hello\/i/);
@@ -136,7 +141,7 @@ describe('runFixture — observation edge cases', () => {
     const r = runFixture(
       makeFixture('<p>bye</p>', [
         { kind: 'regex_match', description: 'needs hello', pattern: 'hello' },
-      ]),
+      ])
     );
     assert.equal(r.pass, false);
     assert.match(r.observations![0].detail, /Expected snapshot to match \/hello\//);
@@ -146,16 +151,14 @@ describe('runFixture — observation edge cases', () => {
     const r = runFixture(
       makeFixture('<p>hello</p>', [
         { kind: 'regex_match', description: 'needs hello', pattern: 'hello' },
-      ]),
+      ])
     );
     assert.equal(r.observations![0].pass, true);
     assert.match(r.observations![0].detail, /\/hello\//);
   });
 
   it('extracts page title from snapshot', () => {
-    const r = runFixture(
-      makeFixture('<html><head><title>  My Page  </title></head></html>', []),
-    );
+    const r = runFixture(makeFixture('<html><head><title>  My Page  </title></head></html>', []));
     assert.equal(r.trace.page_title, 'My Page');
   });
 
@@ -177,9 +180,7 @@ describe('runFixture — observation edge cases', () => {
 
   it('notes do not include a Failed observations section when all pass', () => {
     const r = runFixture(
-      makeFixture('<p>hi</p>', [
-        { kind: 'contains_text', description: 'has hi', needle: 'hi' },
-      ]),
+      makeFixture('<p>hi</p>', [{ kind: 'contains_text', description: 'has hi', needle: 'hi' }])
     );
     assert.doesNotMatch(r.notes, /Failed observations:/);
   });
