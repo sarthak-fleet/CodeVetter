@@ -1,0 +1,11 @@
+{
+  "include": ["src/**/*.ts"],
+  "exclude": ["**/*.test.ts", "src-tauri/**", "src/**/*.d.ts", "src/main.tsx", "src/App.tsx"],
+  "reporter": ["text", "text-summary", "html"],
+  "reportsDirectory": "coverage",
+  "check-coverage": true,
+  "lines": 20,
+  "functions": 25,
+  "statements": 20,
+  "branches": 20
+}

@@ -46,6 +46,10 @@ playwright-report/
 apps/desktop/synthetic-qa-artifacts/
 .playwright-mcp/
 
+# Coverage
+coverage/
+apps/desktop/coverage/
+
 # Misc
 *.log
 .saasmaker.json
