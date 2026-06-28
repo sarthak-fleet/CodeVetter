@@ -283,7 +283,9 @@ function AccountUsageRow({
                     ? 'bg-blue-400'
                     : account.provider === 'cursor'
                       ? 'bg-violet-400'
-                      : 'bg-emerald-400'
+                      : account.provider === 'devin'
+                        ? 'bg-orange-400'
+                        : 'bg-emerald-400'
           }`}
         />
         <span className="text-[13px] font-medium text-slate-200 truncate">{account.name}</span>
@@ -297,7 +299,9 @@ function AccountUsageRow({
                   ? 'bg-blue-500/15 text-blue-400'
                   : account.provider === 'cursor'
                     ? 'bg-violet-500/15 text-violet-300'
-                    : 'bg-emerald-500/15 text-emerald-400'
+                    : account.provider === 'devin'
+                      ? 'bg-orange-500/15 text-orange-400'
+                      : 'bg-emerald-500/15 text-emerald-400'
             }`}
           >
             {planLabel(plan)}
@@ -317,7 +321,9 @@ function AccountUsageRow({
                   ? 'text-blue-400/70 hover:text-blue-400'
                   : account.provider === 'cursor'
                     ? 'text-violet-300/70 hover:text-violet-300'
-                    : 'text-emerald-400/70 hover:text-emerald-400'
+                    : account.provider === 'devin'
+                      ? 'text-orange-400/70 hover:text-orange-400'
+                      : 'text-emerald-400/70 hover:text-emerald-400'
             }`}
             title={
               account.provider === 'openai'
@@ -2353,7 +2359,7 @@ export default function Home() {
                   <Terminal className="mb-2 h-6 w-6 text-slate-600" />
                   <p className="text-[11px] text-slate-500">No CLI accounts detected</p>
                   <p className="text-[11px] text-slate-600 mt-0.5">
-                    Log into Claude Code, Codex, Cursor, or Gemini to auto-detect
+                    Log into Claude Code, Codex, Cursor, Gemini, or Devin to auto-detect
                   </p>
                 </CardContent>
               ) : (

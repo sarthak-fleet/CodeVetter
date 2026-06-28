@@ -110,6 +110,7 @@ pub async fn check_account_usage(
         "openai" => "codex",
         "google" => "gemini",
         "cursor" => "cursor",
+        "devin" => "devin",
         _ => "claude-code",
     };
 
@@ -454,6 +455,11 @@ pub async fn detect_provider_accounts(db: State<'_, DbState>) -> Result<Value, S
         detected.push(acc);
     }
 
+    // ── Detect Devin CLI (local sessions DB, no public usage API) ────────
+    if let Some(acc) = detect_devin_account() {
+        detected.push(acc);
+    }
+
     // ── Auto-create accounts that don't already exist ────────────────────
     let mut created = 0;
     {
@@ -689,6 +695,57 @@ fn detect_cursor_account() -> Option<DetectedAccount> {
         org_id: Some("cursor-local".to_string()),
         org_name: None,
         plan,
+    })
+}
+
+/// Detect Devin CLI account from `~/.config/devin/config.json` + sessions DB.
+///
+/// Devin doesn't expose a public usage API, so live-usage isn't supported —
+/// but we can detect the install via the sessions DB and read the org_id +
+/// configured model from config.json so the Provider Telemetry row shows
+/// real local weekly usage stats (tokens, cost, sessions) indexed from
+/// `~/.local/share/devin/cli/sessions.db`.
+fn detect_devin_account() -> Option<DetectedAccount> {
+    let db_path = crate::commands::history::resolve_devin_sessions_db();
+    if !db_path.exists() {
+        return None;
+    }
+
+    let home = std::env::var("HOME").ok()?;
+    let config_path = std::path::PathBuf::from(&home)
+        .join(".config")
+        .join("devin")
+        .join("config.json");
+
+    let (org_id, model) = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .map(|parsed| {
+            let org = parsed
+                .pointer("/devin/org_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let mdl = parsed
+                .pointer("/agent/model")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            (org, mdl)
+        })
+        .unwrap_or((None, None));
+
+    // Use org_id as the dedup key (stored as api_key in the DB). Fall back
+    // to a fixed local sentinel so a single install still has a stable key.
+    let dedup_key = org_id
+        .clone()
+        .unwrap_or_else(|| "devin-local".to_string());
+
+    Some(DetectedAccount {
+        provider: "devin".to_string(),
+        name: "Devin".to_string(),
+        email: None,
+        org_id: Some(dedup_key),
+        org_name: org_id,
+        plan: model,
     })
 }
 

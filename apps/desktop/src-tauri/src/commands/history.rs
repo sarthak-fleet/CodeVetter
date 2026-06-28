@@ -1923,7 +1923,7 @@ fn index_grok_sessions(conn: &rusqlite::Connection) -> Result<(u64, u64, u64), S
     Ok((indexed, messages, skipped))
 }
 
-fn resolve_devin_sessions_db() -> std::path::PathBuf {
+pub(crate) fn resolve_devin_sessions_db() -> std::path::PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
