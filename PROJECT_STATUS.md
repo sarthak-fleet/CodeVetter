@@ -1,6 +1,6 @@
 # Project Status
 
-Last updated: 2026-06-21
+Last updated: 2026-06-28
 
 ## Current Scope
 
@@ -33,9 +33,9 @@ CodeVetter is a local-first desktop workbench for checking agent-generated code.
 
 ## Planned Next
 
-1. Continue the AI Session Intelligence PRD in `docs/PRD-AI-SESSION-INTELLIGENCE.md`: add direct filesystem-watch tailing for currently open transcript files if periodic indexing proves too coarse; Claude, Codex, and Cursor production session rows now use the normalized raw parser adapter contract, production index passes persist adapter run metadata/parse warnings plus compact message/tool-call archive rows, local backfill repairs older Claude/Codex sessions with missing archive rows, Roadmap shows latest source-health status with per-adapter trends and recent-run drilldowns, Roadmap can search the normalized archive locally, and startup/periodic/manual indexes emit archive update events.
-2. Continue the Agent Verification Timeline PRD in `docs/PRD-AGENT-VERIFICATION-TIMELINE.md`: add fuller non-command conversation reconstruction around replay packets; raw session command anchors with bounded transcript excerpts, explicit agent-claim anchors, command/QA/evidence-count claim-check signals, scope-drift and repeated-edit discrepancy anchors, command-event replay packets, edit-origin anchors, timeline-specific jump targets, timeline-segment replay packets, same-flow post-fix QA deltas, archive search, and the Roadmap latest-build banner are now attached to visible Review/Roadmap actions and proof export.
-3. Continue the Codebase History Explainer PRD in `docs/PRD-CODEBASE-HISTORY-EXPLAINER.md`: turn the persisted `history_brief` slice into a queryable local history graph; Repo Unpacked history brief integration and agent-context sidecar export are now implemented.
+1. Continue the AI Session Intelligence PRD in `docs/archive/PRD-AI-SESSION-INTELLIGENCE.md`: add direct filesystem-watch tailing for currently open transcript files if periodic indexing proves too coarse; Claude, Codex, and Cursor production session rows now use the normalized raw parser adapter contract, production index passes persist adapter run metadata/parse warnings plus compact message/tool-call archive rows, local backfill repairs older Claude/Codex sessions with missing archive rows, Roadmap shows latest source-health status with per-adapter trends and recent-run drilldowns, Roadmap can search the normalized archive locally, and startup/periodic/manual indexes emit archive update events.
+2. Continue the Agent Verification Timeline PRD in `docs/archive/PRD-AGENT-VERIFICATION-TIMELINE.md`: add fuller non-command conversation reconstruction around replay packets; raw session command anchors with bounded transcript excerpts, explicit agent-claim anchors, command/QA/evidence-count claim-check signals, scope-drift and repeated-edit discrepancy anchors, command-event replay packets, edit-origin anchors, timeline-specific jump targets, timeline-segment replay packets, same-flow post-fix QA deltas, archive search, and the Roadmap latest-build banner are now attached to visible Review/Roadmap actions and proof export.
+3. Continue the Codebase History Explainer PRD in `docs/archive/PRD-CODEBASE-HISTORY-EXPLAINER.md`: turn the persisted `history_brief` slice into a queryable local history graph; Repo Unpacked history brief integration and agent-context sidecar export are now implemented.
 4. Curate 20-30 real public agent-generated PR benchmark cases with hand-labeled ground truth before making external catch-rate claims.
 5. Add benchmark fields for unverified-fix count and time/cost impact once review artifacts capture those values consistently.
 6. Add full non-command conversation reconstruction around raw command events when review needs more than command-event replay packets and the normalized command/result window; current history context already extracts anchored shell/tool command events from indexed Claude/Codex JSONL sessions, handles common OpenAI/Gemini tool-call shapes, shows raw/structured command counts, includes bounded normalized context excerpts, previews wider normalized transcript windows, opens source transcript files, and now groups adjacent command events into compact replay packets.
@@ -48,3 +48,7 @@ CodeVetter is a local-first desktop workbench for checking agent-generated code.
 - Broad IDE replacement behavior is parked; CodeVetter should stay focused on verification and review.
 - Generic synthetic browser testing for every app type is deferred until the supported local-app matrix is explicit.
 - Marketplace, hosted multi-tenant collaboration, and CI enforcement are deferred behind a stronger local evidence loop.
+
+### Blocked
+
+- (none)
