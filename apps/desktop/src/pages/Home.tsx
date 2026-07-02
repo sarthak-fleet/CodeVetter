@@ -214,6 +214,61 @@ function UsageBar({
   );
 }
 
+function localTelemetryQualifier(provider: string): string {
+  if (provider === 'devin') return 'local metrics';
+  if (provider === 'grok') return 'local estimates';
+  return 'local estimates only';
+}
+
+function LocalModelBreakdown({
+  usage,
+  provider,
+}: {
+  usage: AccountUsage | null;
+  provider: string;
+}) {
+  if (!usage) return null;
+  const cacheTokens = usage.week_cache_read_tokens + usage.week_cache_creation_tokens;
+  const rows = usage.model_breakdown ?? [];
+  const showModels = rows.length > 0 && ['devin', 'grok'].includes(provider);
+  if (cacheTokens === 0 && !showModels) return null;
+
+  return (
+    <div className="flex flex-col gap-1.5 border-l border-[#1a1a1a] pl-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] tabular-nums text-slate-600">
+        <span>{formatTokens(usage.week_input_tokens)} in</span>
+        <span>{formatTokens(usage.week_output_tokens)} out</span>
+        {cacheTokens > 0 && <span>{formatTokens(cacheTokens)} cached</span>}
+        <span>{formatMoney(usage.week_cost)}</span>
+      </div>
+      {showModels && (
+        <div className="flex flex-col gap-1">
+          {rows.slice(0, 5).map((model) => {
+            const total =
+              model.week_input_tokens +
+              model.week_output_tokens +
+              model.week_cache_read_tokens +
+              model.week_cache_creation_tokens;
+            return (
+              <div
+                key={model.model}
+                className="flex items-center justify-between gap-2 text-[10px] tabular-nums"
+              >
+                <span className="truncate text-slate-500" title={model.model}>
+                  {model.model}
+                </span>
+                <span className="shrink-0 text-slate-600">
+                  {formatTokens(total)} · {formatMoney(model.week_cost)} · {model.week_sessions}s
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AccountUsageRow({
   account,
   usage,
@@ -244,7 +299,7 @@ function AccountUsageRow({
   const weekSessions = usage?.week_sessions ?? 0;
   const weekTokens = (usage?.week_input_tokens ?? 0) + (usage?.week_output_tokens ?? 0);
   const profileBreakdown = usage?.profile_breakdown ?? [];
-  const plan = usage?.plan ?? account.plan;
+  const plan = account.provider === 'devin' ? null : (usage?.plan ?? account.plan);
 
   // Live rate limit data — supported for all providers now
   const isLiveSupported = ['anthropic', 'openai', 'google', 'cursor'].includes(account.provider);
@@ -288,7 +343,9 @@ function AccountUsageRow({
                       ? 'bg-violet-400'
                       : account.provider === 'devin'
                         ? 'bg-orange-400'
-                        : 'bg-emerald-400'
+                        : account.provider === 'grok'
+                          ? 'bg-sky-400'
+                          : 'bg-emerald-400'
           }`}
         />
         <span className="text-[13px] font-medium text-slate-200 truncate">{account.name}</span>
@@ -304,7 +361,9 @@ function AccountUsageRow({
                     ? 'bg-violet-500/15 text-violet-300'
                     : account.provider === 'devin'
                       ? 'bg-orange-500/15 text-orange-400'
-                      : 'bg-emerald-500/15 text-emerald-400'
+                      : account.provider === 'grok'
+                        ? 'bg-sky-500/15 text-sky-300'
+                        : 'bg-emerald-500/15 text-emerald-400'
             }`}
           >
             {planLabel(plan)}
@@ -335,7 +394,9 @@ function AccountUsageRow({
                     ? 'text-violet-300/70 hover:text-violet-300'
                     : account.provider === 'devin'
                       ? 'text-orange-400/70 hover:text-orange-400'
-                      : 'text-emerald-400/70 hover:text-emerald-400'
+                      : account.provider === 'grok'
+                        ? 'text-sky-300/70 hover:text-sky-300'
+                        : 'text-emerald-400/70 hover:text-emerald-400'
             }`}
             title={
               account.provider === 'openai'
@@ -606,9 +667,12 @@ function AccountUsageRow({
                 {weekSessions} sessions
               </span>
               {!hasLive && !liveErrorHint && (
-                <span className="text-[10px] text-slate-700 italic">local estimates only</span>
+                <span className="text-[10px] text-slate-700 italic">
+                  {localTelemetryQualifier(account.provider)}
+                </span>
               )}
             </div>
+            <LocalModelBreakdown usage={usage} provider={account.provider} />
             {liveErrorHint && (
               <div className="flex items-start gap-1.5 text-[10px] text-amber-400/90">
                 <span className="shrink-0">⚠</span>
@@ -699,6 +763,8 @@ function telemetrySourceNote(provider: string): string | null {
   switch (provider) {
     case 'devin':
       return 'Source: local Devin sessions.db, assistant messages deduped by message id; no live quota API.';
+    case 'grok':
+      return 'Source: local Grok sessions, input estimated from per-turn context and output from chat history.';
     case 'cursor':
       return 'Source: Cursor plan API when refreshed; local session tokens are partial estimates.';
     case 'google':
@@ -2483,7 +2549,7 @@ export default function Home() {
                   <Terminal className="mb-2 h-6 w-6 text-slate-600" />
                   <p className="text-[11px] text-slate-500">No CLI accounts detected</p>
                   <p className="text-[11px] text-slate-600 mt-0.5">
-                    Log into Claude Code, Codex, Cursor, Gemini, or Devin to auto-detect
+                    Log into Claude Code, Codex, Cursor, Devin, or Grok to auto-detect
                   </p>
                 </CardContent>
               ) : visibleAccounts.length === 0 ? (

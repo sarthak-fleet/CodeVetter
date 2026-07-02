@@ -111,6 +111,7 @@ pub async fn check_account_usage(
         "google" => "gemini",
         "cursor" => "cursor",
         "devin" => "devin",
+        "grok" => "grok",
         _ => "claude-code",
     };
 
@@ -128,18 +129,36 @@ pub async fn check_account_usage(
     let day_of_week = today.weekday().num_days_from_monday() + 1; // 1-indexed
 
     // ── This week cost + tokens ─────────────────────────────────────────
-    let (week_cost, week_input, week_output, week_sessions): (f64, i64, i64, i64) = conn
+    let (week_cost, week_input, week_output, week_cache_read, week_cache_creation, week_sessions): (
+        f64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = conn
         .query_row(
             "SELECT COALESCE(SUM(estimated_cost_usd), 0),
                     COALESCE(SUM(total_input_tokens), 0),
                     COALESCE(SUM(total_output_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(cache_creation_tokens), 0),
                     COUNT(*)
              FROM cc_sessions
              WHERE agent_type = ?1 AND last_message >= ?2",
             rusqlite::params![agent_type, week_start_str],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
         )
-        .unwrap_or((0.0, 0, 0, 0));
+        .unwrap_or((0.0, 0, 0, 0, 0, 0));
 
     // ── Last week cost (baseline for percentage) ────────────────────────
     let last_week_cost: f64 = conn
@@ -275,6 +294,36 @@ pub async fn check_account_usage(
         })
         .collect();
 
+    // ── Per-model breakdown for local tools like Devin/Grok ─────────────
+    let mut model_breakdown: Vec<Value> = Vec::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT COALESCE(NULLIF(model_used, ''), 'unknown') AS model,
+                COALESCE(SUM(estimated_cost_usd), 0),
+                COALESCE(SUM(total_input_tokens), 0),
+                COALESCE(SUM(total_output_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COUNT(*)
+         FROM cc_sessions
+         WHERE agent_type = ?1 AND last_message >= ?2
+         GROUP BY model
+         ORDER BY 2 DESC, 3 DESC",
+    ) {
+        if let Ok(rows) = stmt.query_map(rusqlite::params![agent_type, week_start_str], |row| {
+            Ok(json!({
+                "model": row.get::<_, String>(0)?,
+                "week_cost": row.get::<_, f64>(1)?,
+                "week_input_tokens": row.get::<_, i64>(2)?,
+                "week_output_tokens": row.get::<_, i64>(3)?,
+                "week_cache_read_tokens": row.get::<_, i64>(4)?,
+                "week_cache_creation_tokens": row.get::<_, i64>(5)?,
+                "week_sessions": row.get::<_, i64>(6)?,
+            }))
+        }) {
+            model_breakdown = rows.flatten().collect();
+        }
+    }
+
     Ok(json!({
         "account_id": account.id,
         "provider": account.provider,
@@ -291,6 +340,8 @@ pub async fn check_account_usage(
         "week_cost": week_cost,
         "week_input_tokens": week_input,
         "week_output_tokens": week_output,
+        "week_cache_read_tokens": week_cache_read,
+        "week_cache_creation_tokens": week_cache_creation,
         "week_sessions": week_sessions,
         "week_pct": week_pct,
         "week_remaining": week_remaining,
@@ -306,6 +357,7 @@ pub async fn check_account_usage(
         "session_messages": session_messages,
         "session_id": session_id,
         "profile_breakdown": profile_breakdown,
+        "model_breakdown": model_breakdown,
     }))
 }
 
@@ -364,6 +416,7 @@ fn usage_profile_label(agent_type: &str, jsonl_path: Option<&str>) -> String {
         "gemini" => "Gemini (~/.gemini)".to_string(),
         "cursor" => "Cursor (workspace storage)".to_string(),
         "devin" => "Devin (~/.local/share/devin)".to_string(),
+        "grok" => "Grok (~/.grok/sessions)".to_string(),
         other => other.to_string(),
     }
 }
@@ -457,6 +510,11 @@ pub async fn detect_provider_accounts(db: State<'_, DbState>) -> Result<Value, S
 
     // ── Detect Devin CLI (local sessions DB, no public usage API) ────────
     if let Some(acc) = detect_devin_account() {
+        detected.push(acc);
+    }
+
+    // ── Detect Grok CLI (local sessions, no public usage API) ────────────
+    if let Some(acc) = detect_grok_account() {
         detected.push(acc);
     }
 
@@ -746,6 +804,31 @@ fn detect_devin_account() -> Option<DetectedAccount> {
         org_id: Some(dedup_key),
         org_name: org_id,
         plan: model,
+    })
+}
+
+/// Detect Grok CLI from local session history.
+///
+/// Grok does not expose a local auth/usage API that we can safely query here,
+/// but CodeVetter already indexes `~/.grok/sessions` into `cc_sessions`. A
+/// synthetic local account makes that indexed telemetry visible alongside
+/// Claude/Codex/Devin provider rows.
+fn detect_grok_account() -> Option<DetectedAccount> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let sessions_dir = std::path::PathBuf::from(home).join(".grok").join("sessions");
+    if !sessions_dir.exists() {
+        return None;
+    }
+
+    Some(DetectedAccount {
+        provider: "grok".to_string(),
+        name: "Grok".to_string(),
+        email: None,
+        org_id: Some("grok-local".to_string()),
+        org_name: None,
+        plan: None,
     })
 }
 

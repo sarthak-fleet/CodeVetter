@@ -1336,6 +1336,8 @@ export interface AccountUsage {
   week_cost: number;
   week_input_tokens: number;
   week_output_tokens: number;
+  week_cache_read_tokens: number;
+  week_cache_creation_tokens: number;
   week_sessions: number;
   week_pct: number | null;
   week_remaining: number | null;
@@ -1355,6 +1357,15 @@ export interface AccountUsage {
     week_cost: number;
     week_input_tokens: number;
     week_output_tokens: number;
+    week_sessions: number;
+  }>;
+  model_breakdown: Array<{
+    model: string;
+    week_cost: number;
+    week_input_tokens: number;
+    week_output_tokens: number;
+    week_cache_read_tokens: number;
+    week_cache_creation_tokens: number;
     week_sessions: number;
   }>;
 }
